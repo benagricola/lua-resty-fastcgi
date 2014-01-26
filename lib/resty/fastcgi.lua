@@ -1,4 +1,5 @@
 local ffi = require 'ffi'
+
 local ngx_socket_tcp = ngx.socket.tcp
 local str_char = string.char
 local str_byte = string.byte
@@ -16,10 +17,16 @@ local ngx_log = ngx.log
 local ngx_DEBUG = ngx.DEBUG
 local ngx_ERR = ngx.ERR
 local co_yield = coroutine.yield
+local ffi_new = ffi.new
 local ffi_abi = ffi.abi
+local ffi_string = ffi.string
+local ffi_sizeof = ffi.sizeof
+local ffi_metatype = ffi.metatype
 local pairs = pairs
 local bit_band = bit.band
-local binutil = require 'resty.binutil'
+local bit_rshift = bit.rshift
+local bit_lshift = bit.lshift
+local bit_bor = bit.bor
 
 local _M = {
     _VERSION = '0.01',
@@ -36,34 +43,168 @@ local FCGI_PARAMS             = 0x04
 local FCGI_STDIN              = 0x05
 local FCGI_STDOUT             = 0x06
 local FCGI_STDERR             = 0x07
-local FCGI_DATA               = 0x08
-local FCGI_GET_VALUES         = 0x09
-local FCGI_GET_VALUES_RESULT  = 0x10
-local FCGI_UNKNOWN_TYPE       = 0x11
-local FCGI_MAXTYPE            = 0x11
 local FCGI_PARAM_HIGH_BIT     = 2147483648
 local FCGI_BODY_MAX_LENGTH    = 32768
 local FCGI_KEEP_CONN          = 0x01
 local FCGI_NO_KEEP_CONN       = 0x00
-local FCGI_NULL_REQUEST_ID    = 0x00
 local FCGI_RESPONDER          = 0x01
-local FCGI_AUTHORIZER         = 0x02
-local FCGI_FILTER             = 0x03
 
-local FCGI_HEADER_FORMAT = {
-    {"version",1,FCGI_VERSION_1},
-    {"type",1,nil},
-    {"request_id",2,1},
-    {"content_length",2,0},
-    {"padding_length",1,0},
-    {"reserved",1,0}
+ffi.cdef[[
+    typedef struct {
+        unsigned char version;
+        unsigned char type;
+        unsigned char requestId1;
+        unsigned char requestId0;
+        unsigned char contentLength1;
+        unsigned char contentLength0;
+        unsigned char paddingLength;
+        unsigned char reserved;
+    } FCGI_Header;
+
+    typedef struct {
+        unsigned char role1;
+        unsigned char role0;
+        unsigned char flags;
+        unsigned char reserved[5];
+    } FCGI_BeginRequestBody;
+
+    typedef struct {
+        unsigned char appStatus3;
+        unsigned char appStatus2;
+        unsigned char appStatus1;
+        unsigned char appStatus0;
+        unsigned char protocolStatus;
+        unsigned char reserved[3];
+    } FCGI_EndRequestBody;
+
+    typedef struct {
+        FCGI_Header header;
+        FCGI_EndRequestBody body;
+    } FCGI_EndRequestRecord;
+
+
+    typedef struct {
+        unsigned char nameLength;
+        unsigned char valueLength;
+    } FCGI_NameValueHeader11;
+
+    typedef struct {
+        unsigned char nameLength;
+        unsigned char valueLength3;
+        unsigned char valueLength2;
+        unsigned char valueLength1;
+        unsigned char valueLength0;
+    } FCGI_NameValueHeader14;
+
+    typedef struct {
+        unsigned char nameLength3;
+        unsigned char nameLength2;
+        unsigned char nameLength1;
+        unsigned char nameLength0;
+        unsigned char valueLength;
+    } FCGI_NameValueHeader41;
+
+    typedef struct {
+        unsigned char nameLength3;
+        unsigned char nameLength2;
+        unsigned char nameLength1;
+        unsigned char nameLength0;
+        unsigned char valueLength3;
+        unsigned char valueLength2;
+        unsigned char valueLength1;
+        unsigned char valueLength0;
+    } FCGI_NameValueHeader44;
+]]
+
+local extract_bytes = function (obj,key,len)
+    local field
+    local val = 0
+    for i=0, len-1 do
+        field = tbl_concat{key,i}
+        val = val + bit_lshift(obj[field],i * 8)
+    end
+    return val
+end
+
+local push_bytes = function(obj,key,value,len)
+    local field
+    for i=0, len-1 do
+        field = tbl_concat{key,i}
+        obj[field] = bit_band(bit_rshift(value,i*8),0xff)
+    end
+end
+
+local fcgi_mt = {
+    __index = function(self,key)
+        if key == "requestId" or key == "contentLength" or key == "role" then
+            return extract_bytes(self,key,2)
+        elseif key == "appStatus" then
+            return extract_bytes(self,key,4)
+        end
+    end,
+    __newindex = function(self,key,value)
+        if key == "requestId" or key == "contentLength" or key == "role" then
+            return push_bytes(self,key,value,2)
+        elseif key == "appStatus" then
+            return push_bytes(self,key,value,4)
+        end
+    end
 }
 
-local FCGI_END_REQ_FORMAT = {
-    {"status",4,nil},
-    {"protocolStatus",1,nil},
-    {"reserved",3,nil}
+local fcgi_nvh11_mt = {
+    __index = function(self,key)
+        return extract_bytes(self,key,1)
+    end,
+    __newindex = function(self,key,value)
+        return push_bytes(self,key,value,1)
+    end
 }
+
+local fcgi_nvh14_mt = {
+    __index = function(self,key)
+        return (key == "valueLength") and extract_bytes(self,key,4) or extract_bytes(self,key,1)
+    end,
+    __newindex = function(self,key,value)
+        return (key == "valueLength") and push_bytes(self,key,value + FCGI_PARAM_HIGH_BIT,4) or push_bytes(self,key,value,1)
+    end
+}
+
+local fcgi_nvh41_mt = {
+    __index = function(self,key)
+        return (key == "nameLength") and extract_bytes(self,key,4) or extract_bytes(self,key,1)
+    end,
+    __newindex = function(self,key,value)
+        return (key == "nameLength") and push_bytes(self,key,value + FCGI_PARAM_HIGH_BIT,4) or push_bytes(self,key,value,1)
+    end
+}
+
+local fcgi_nvh44_mt = {
+    __index = function(self,key)
+        return extract_bytes(self,key,4)
+    end,
+    __newindex = function(self,key,value)
+        return push_bytes(self,key,value + FCGI_PARAM_HIGH_BIT,4)
+    end
+}
+
+local FCGI_Header = ffi.typeof('FCGI_Header')
+local FCGI_BeginRequestBody = ffi.typeof('FCGI_BeginRequestBody')
+local FCGI_EndRequestBody = ffi.typeof('FCGI_EndRequestBody')
+
+ffi_metatype(FCGI_Header,fcgi_mt)
+ffi_metatype(FCGI_BeginRequestBody,fcgi_mt)
+ffi_metatype(FCGI_EndRequestBody,fcgi_mt)
+
+local FCGI_NameValueHeader11 = ffi.typeof('FCGI_NameValueHeader11')
+local FCGI_NameValueHeader14 = ffi.typeof('FCGI_NameValueHeader14')
+local FCGI_NameValueHeader41 = ffi.typeof('FCGI_NameValueHeader41')
+local FCGI_NameValueHeader44 = ffi.typeof('FCGI_NameValueHeader44')
+
+ffi_metatype(FCGI_NameValueHeader11,fcgi_nvh11_mt)
+ffi_metatype(FCGI_NameValueHeader14,fcgi_nvh14_mt)
+ffi_metatype(FCGI_NameValueHeader41,fcgi_nvh41_mt)
+ffi_metatype(FCGI_NameValueHeader44,fcgi_nvh44_mt)
+
 
 local function _pad(bytes)
     return str_rep(str_char(0), bytes)
@@ -75,6 +216,7 @@ function _M.new(_)
     if not sock then
         return nil, err
     end
+
 
     local self = {
         sock = sock,
@@ -95,7 +237,7 @@ function _M.new(_)
             SERVER_ADDR         = ngx.var.server_addr,
             SERVER_PORT         = ngx.var.server_port,
             SERVER_NAME         = ngx.var.server_name,
-        }
+        },
     }
 
     return setmetatable(self, mt)
@@ -166,21 +308,20 @@ end
 
 
 function _M._pack_header(self,params)
-    local align = 8
-    local header = {}
+    local align             = 8
+    local content_length    = params.content_length or 0
+    local padding           = bit_band(-(content_length or 0),align - 1)
 
-    params.padding_length = bit_band(-(params.content_length or 0),align - 1)
+    local header            = FCGI_Header()
+    header.version          = FCGI_VERSION_1
+    header.type             = params.type
+    header.requestId        = 1
+    header.contentLength    = content_length
+    header.paddingLength    = padding
 
-    for index, field in ipairs(FCGI_HEADER_FORMAT) do
-        if params[field[1]] == nil then
-            header[index] = binutil.ntob(field[3],field[2])
-        else
-            header[index] = binutil.ntob(params[field[1]],field[2])
-        end
-    end
-
-    return tbl_concat(header), params.padding_length
+    return ffi_string(header, ffi_sizeof(header)), padding
 end
+
 
 function _M._unpack_bytes(self,format,str)
     -- If we received nil, return nil
@@ -188,17 +329,9 @@ function _M._unpack_bytes(self,format,str)
         return nil
     end
 
-    local res = {}
-    local idx = 1
-
-    -- Extract bytes based on format. Convert back to number and place in res rable
-    for index, field in ipairs(format) do
-        ngx_log(ngx_DEBUG,"Unpacking ",field[1]," with length ",field[2]," from ",idx," to ",(idx + field[2]))
-        res[field[1]] = binutil.bton(str_sub(str,idx,idx + field[2] - 1))
-        idx = idx + field[2]
-    end
-
-    return res
+    local struct = format()
+    ffi.copy(struct,str,#str)
+    return struct
 end
 
 
@@ -212,12 +345,30 @@ function _M._format_params(self,params)
         keylen = #key
         valuelen = #value
 
+        local paramheader
+
+        if keylen < 127 then
+            if valuelen < 127 then
+                paramheader = FCGI_NameValueHeader11()
+            else
+                paramheader = FCGI_NameValueHeader14()
+            end
+        else
+            if valuelen < 127 then
+                paramheader = FCGI_NameValueHeader41()
+            else
+                paramheader = FCGI_NameValueHeader44()
+            end
+        end
+
+        paramheader.nameLength = keylen
+        paramheader.valueLength = valuelen
+
         -- If length of field is longer than 127, we represent 
         -- it as 4 bytes with high bit set to 1 (+2147483648 or FCGI_PARAM_HIGH_BIT)
         new_params = tbl_concat{
             new_params,
-            (keylen < 127) and binutil.ntob(keylen) or binutil.ntob(keylen + FCGI_PARAM_HIGH_BIT,4),
-            (valuelen < 127) and binutil.ntob(valuelen) or binutil.ntob(valuelen + FCGI_PARAM_HIGH_BIT,4),
+            ffi_string(paramheader,ffi_sizeof(paramheader)),
             key,
             value,
         }
@@ -241,20 +392,19 @@ function _M._begin_request(self,fcgi_params)
 
     local header, padding = self:_pack_header{
         type            = FCGI_BEGIN_REQUEST,
-        request_id      = 1,
         content_length  = FCGI_HEADER_LEN,
     }
 
-    -- We only need to do this once so no point complicating things
-    local body = tbl_concat{
-        binutil.ntob(FCGI_RESPONDER,2), -- Role, 2 bytes
-        binutil.ntob(self.keepalives and 1 or 0), -- Flags, 1 byte
-        binutil.ntob(0,5),
-    }
+    -- Build up the BeginRequestBody
+    local body  = FCGI_BeginRequestBody()
+    body.role   = FCGI_RESPONDER
+    body.flags  = self.keepalives and FCGI_KEEP_CONN or FCGI_NO_KEEP_CONN
 
+    -- Format fcgi parameter records
     local params = self:_format_params(fcgi_params)
 
-    return tbl_concat{header, body, _pad(padding), params}
+    -- Return formatted request packet
+    return tbl_concat{header, ffi_string(body, ffi_sizeof(body)), _pad(padding), params}
 end
 
 function _M.abort_request(self)
@@ -283,26 +433,26 @@ function _M._format_stdin(self,stdin)
 
     local header = ""
     local padding = 0
-
+    local stdin_len = #stdin
+    local chunks = 1
     repeat
         -- While we still have stdin data, build up STDIN record
-        -- Max 65k data in each
-        chunk_length = (#stdin > FCGI_BODY_MAX_LENGTH) and FCGI_BODY_MAX_LENGTH or #stdin
+        chunk_length = (stdin_len > FCGI_BODY_MAX_LENGTH) and FCGI_BODY_MAX_LENGTH or stdin_len
 
         header, padding = self:_pack_header{
             type            = FCGI_STDIN,
             content_length  = chunk_length,
         }
 
-        ngx_log(ngx_DEBUG,"Chunk length is " .. chunk_length .. " header length is " .. #header)
-
         stdin_chunk[1] = header
         stdin_chunk[2] = str_sub(stdin,1,chunk_length)
         stdin_chunk[3] = _pad(padding)
 
-        to_send[#to_send+1] = tbl_concat(stdin_chunk)
+        to_send[chunks] = tbl_concat(stdin_chunk)
         stdin = str_sub(stdin,chunk_length - padding + 1) -- str:sub is inclusive of the first character 
-    until #stdin == 0
+        stdin_len = #stdin
+        chunks = chunks + 1
+    until stdin_len == 0
 
     return tbl_concat(to_send)
 end
@@ -332,14 +482,14 @@ function _M.request(self,params)
     while true do
         -- Read and unpack 8 bytes of next record header
         local header_bytes, err = sock:receive(FCGI_HEADER_LEN)
-        local header = self:_unpack_bytes(FCGI_HEADER_FORMAT,header_bytes)
+        local header = self:_unpack_bytes(FCGI_Header,header_bytes)
 
         if not header then
             return nil, err or "Unable to parse FCGI record header"
         end
 
-        ngx_log(ngx_DEBUG,"Reading " .. header.content_length + header.padding_length .. " bytes")
-        local data = sock:receive(header.content_length + header.padding_length)
+        ngx_log(ngx_DEBUG,"Reading " .. header.contentLength + header.paddingLength .. " bytes")
+        local data = sock:receive(header.contentLength + header.paddingLength)
 
         if not data then
             return nil, err
@@ -348,14 +498,18 @@ function _M.request(self,params)
         -- Get data minus the padding bytes
         data = str_sub(data,1,header.content_length)
 
-        -- Assign data to correct attr or end request
+        -- If stdout packet, assign data to stdout
         if header.type == FCGI_STDOUT then
             res.stdout[#res.stdout+1] = data
+
+        -- Otherwise if stderr packet, assign data to stderr
         elseif header.type == FCGI_STDERR then
             res.stderr[#res.stderr+1] = data
+
+        -- Otherwise if this is the end of the request, return saved data
         elseif header.type == FCGI_END_REQUEST then
             ngx_log(ngx_DEBUG,"Reading end request")
-            local stats = self:_unpack_bytes(FCGI_END_REQ_FORMAT,data)
+            local stats = self:_unpack_bytes(FCGI_EndRequestBody,data)
 
             if not stats then
                 return nil, "Unable to parse FCGI end request data"
@@ -363,13 +517,13 @@ function _M.request(self,params)
 
             res.status = stats
             return res
+
+        -- Otherwise this is an unidentified record. Throw error.
         else
             ngx_log(ngx_DEBUG,header.type)
             return nil, "Received unidentified FCGI record"
         end
-
     end
 end
-
 
 return _M
