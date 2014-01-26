@@ -76,9 +76,9 @@ OK
             
             for _, pair in ipairs(test) do
                 if pair[1] ~= pair[2] then
-                    -- ngx.status = 500
-                    ngx.say(pair[1])
-                    -- ngx.exit(500)
+                    ngx.status = 500
+                    ngx.say("ERR")
+                    ngx.exit(500)
                 end
             end
 
