@@ -1,13 +1,13 @@
 local ffi = require 'ffi'
 
-local str_byte = string.byte
-local str_char = string.char
-local bit_lshift = bit.lshift
-local bit_rshift = bit.rshift
-local bit_band = bit.band
-local tbl_concat = table.concat
-local ipairs = ipairs
-local ffi_new = ffi.new
+local str_byte      = string.byte
+local str_char      = string.char
+local bit_lshift    = bit.lshift
+local bit_rshift    = bit.rshift
+local bit_band      = bit.band
+local tbl_concat    = table.concat
+local ipairs        = ipairs
+local ffi_new       = ffi.new
 
 local _M = {}
 
@@ -15,9 +15,7 @@ local _M = {}
 function _M.ntob(num,bytes)
     bytes = bytes or 1
 
-    local str = {
-        "","","","","","","","",""
-    }
+    local str = ""
 
     -- Mask high bit
     local mask = bit_lshift(0xff,(bytes-1)*8)
@@ -27,11 +25,11 @@ function _M.ntob(num,bytes)
         -- This puts it into byte '0'.
         local val = bit_rshift(bit_band(num,mask),(bytes-i)*8)
         -- Pass it to str_char and append to table
-        str[i] = str_char(val)
+        str = str .. str_char(val)
         -- Shift the mask 1 byte to the left and repeat
         mask = bit_rshift(mask,8)
     end
-    return tbl_concat(str)
+    return str
 end
 
 

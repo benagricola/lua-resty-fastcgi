@@ -1,31 +1,40 @@
-local ffi = require 'ffi'
-local ngx_socket_tcp = ngx.socket.tcp
-local str_char = string.char
-local str_byte = string.byte
-local str_rep = string.rep
-local str_gmatch = string.gmatch
-local str_lower = string.lower
-local str_upper = string.upper
-local str_find = string.find
-local str_sub = string.sub
-local math_floor = math.floor
-local tbl_concat = table.concat
-local ngx_encode_args = ngx.encode_args
-local ngx_re_match = ngx.re.match
-local ngx_log = ngx.log
-local ngx_DEBUG = ngx.DEBUG
-local ngx_ERR = ngx.ERR
-local co_yield = coroutine.yield
-local ffi_abi = ffi.abi
-local pairs = pairs
-local bit_band = bit.band
-local binutil = require 'resty.binutil'
+local binutil           = require 'resty.binutil'
+local ntob              = binutil.ntob
+local bton              = binutil.bton
+
+local bit_band          = bit.band
+
+local ngx_socket_tcp    = ngx.socket.tcp
+local ngx_encode_args   = ngx.encode_args
+local ngx_re_gsub       = ngx.re.gsub
+local ngx_re_gmatch     = ngx.re.gmatch
+local ngx_re_match      = ngx.re.match
+local ngx_re_find       = ngx.re.find
+local ngx_log           = ngx.log
+local ngx_DEBUG         = ngx.DEBUG
+local ngx_ERR           = ngx.ERR
+
+local str_char          = string.char
+local str_byte          = string.byte
+local str_rep           = string.rep
+local str_lower         = string.lower
+local str_upper         = string.upper
+local str_sub           = string.sub
+
+local math_floor        = math.floor
+
+local tbl_concat        = table.concat
+local pairs             = pairs
+local ipairs            = ipairs
+
 
 local _M = {
     _VERSION = '0.01',
 }
 
+
 local mt = { __index = _M }
+
 
 local FCGI_HEADER_LEN         = 0x08
 local FCGI_VERSION_1          = 0x01
@@ -42,13 +51,14 @@ local FCGI_GET_VALUES_RESULT  = 0x10
 local FCGI_UNKNOWN_TYPE       = 0x11
 local FCGI_MAXTYPE            = 0x11
 local FCGI_PARAM_HIGH_BIT     = 2147483648
-local FCGI_BODY_MAX_LENGTH    = 32768
+local FCGI_BODY_MAX_LENGTH    = 65535
 local FCGI_KEEP_CONN          = 0x01
 local FCGI_NO_KEEP_CONN       = 0x00
 local FCGI_NULL_REQUEST_ID    = 0x00
 local FCGI_RESPONDER          = 0x01
 local FCGI_AUTHORIZER         = 0x02
 local FCGI_FILTER             = 0x03
+
 
 local FCGI_HEADER_FORMAT = {
     {"version",1,FCGI_VERSION_1},
@@ -59,14 +69,151 @@ local FCGI_HEADER_FORMAT = {
     {"reserved",1,0}
 }
 
+
+local FCGI_BEGIN_REQ_FORMAT = {
+    {"role",2,FCGI_RESPONDER},
+    {"flags",1,0},
+    {"reserved",5,0}
+}
+
+
 local FCGI_END_REQ_FORMAT = {
     {"status",4,nil},
     {"protocolStatus",1,nil},
     {"reserved",3,nil}
 }
 
+
+local FCGI_HIDE_HEADERS = {
+    "Status",
+    "X-Accel-Expires",
+    "X-Accel-Redirect",
+    "X-Accel-Limit-Rate",
+    "X-Accel-Buffering",
+    "X-Accel-Charset"
+}
+
+
+local FCGI_DEFAULT_PARAMS = {
+    {"SCRIPT_FILENAME", "document_root"},
+    {"QUERY_STRING", "query_string"},
+    {"REQUEST_METHOD", "request_method"},
+    {"CONTENT_TYPE", "content_type"},
+    {"CONTENT_LENGTH", "content_length"},
+    {"REQUEST_URI", "request_uri"},
+    {"DOCUMENT_ROOT", "document_root"},
+    {"SERVER_PROTOCOL", "server_protocol"},
+    {"GATEWAY_INTERFACE", "CGI/1.1"},
+    {"SERVER_SOFTWARE", "lua-resty-fastcgi/" .. _M._VERSION},
+    {"REMOTE_ADDR", "remote_addr"},
+    {"REMOTE_PORT", "remote_port"},
+    {"SERVER_ADDR", "server_addr"},
+    {"SERVER_PORT", "server_port"},
+    {"SERVER_NAME", "server_name"},
+}
+
+
+local function _merge_fcgi_params(params)
+    local new_params = {}
+
+    local set_params = {}
+    for _,v in ipairs(params) do
+        new_params[#new_params+1] = {v[1],v[2]}
+        set_params[v[1]] = true
+    end
+
+    -- Populate default params if they don't exist in user params
+    for _,v in ipairs(FCGI_DEFAULT_PARAMS) do
+        if not set_params[v[1]] then
+            if ngx.var[v[2]] then
+                new_params[#new_params+1] = {v[1],ngx.var[v[2]]}
+            else
+                new_params[#new_params+1] = {v[1],v[2]}
+            end
+        end
+    end
+
+    return new_params
+end
+
+
+local function _pack(format,params)
+    local bytes = ""
+
+    for index, field in ipairs(format) do
+        if params[field[1]] == nil then
+            bytes = bytes .. ntob(field[3],field[2])
+        else
+            bytes = bytes .. ntob(params[field[1]],field[2])
+        end
+    end
+
+    return bytes
+end
+
+
+local function _pack_header(params)
+    local align = 8
+
+    params.padding_length = bit_band(-(params.content_length or 0),align - 1)
+    local header = _pack(FCGI_HEADER_FORMAT,params)
+    return header, params.padding_length
+end
+
+
+local function _unpack_bytes(format,str)
+    -- If we received nil, return nil
+    if not str then
+        return nil
+    end
+
+    local res = {}
+    local idx = 1
+
+    -- Extract bytes based on format. Convert back to number and place in res rable
+    for index, field in ipairs(format) do
+        -- ngx_log(ngx_DEBUG,"Unpacking ",field[1]," with length ",field[2]," from ",idx," to ",(idx + field[2]))
+        res[field[1]] = binutil.bton(str_sub(str,idx,idx + field[2] - 1))
+        idx = idx + field[2]
+    end
+
+    return res
+end
+
+
+local FCGI_PREPACKED = {
+    end_params = _pack_header{
+        type    = FCGI_PARAMS,
+    },
+    begin_request_header = _pack_header{
+        type            = FCGI_BEGIN_REQUEST,
+        request_id      = 1,
+        content_length  = FCGI_HEADER_LEN,
+    },
+    begin_request_body = _pack(FCGI_BEGIN_REQ_FORMAT,{
+        role = FCGI_RESPONDER,
+        flags = 1,
+    }),
+    abort_request = _pack_header{
+        type            = FCGI_ABORT_REQUEST,
+    },
+}
+
+
+local pad = {
+    "",
+    str_char(0),
+    str_char(0,0),
+    str_char(0,0,0),
+    str_char(0,0,0,0),
+    str_char(0,0,0,0,0),
+    str_char(0,0,0,0,0,0),
+    str_char(0,0,0,0,0,0,0),
+}
+
+
 local function _pad(bytes)
-    return str_rep(str_char(0), bytes)
+    return pad[bytes]
 end
 
 
@@ -79,23 +226,6 @@ function _M.new(_)
     local self = {
         sock = sock,
         keepalives = true,
-        default_params = {
-            SCRIPT_FILENAME     = ngx.var.document_root .. "/index.php",
-            QUERY_STRING        = ngx.var.query_string,
-            REQUEST_METHOD      = ngx.var.request_method,
-            CONTENT_TYPE        = ngx.var.content_type,
-            CONTENT_LENGTH      = ngx.var.content_length,
-            REQUEST_URI         = ngx.var.request_uri,
-            DOCUMENT_ROOT       = ngx.var.document_root,
-            SERVER_PROTOCOL     = ngx.var.server_protocol,
-            GATEWAY_INTERFACE   = "CGI/1.1",
-            SERVER_SOFTWARE     = "lua-resty-fastcgi/" .. _M._VERSION,
-            REMOTE_ADDR         = ngx.var.remote_addr,
-            REMOTE_PORT         = ngx.var.remote_port,
-            SERVER_ADDR         = ngx.var.server_addr,
-            SERVER_PORT         = ngx.var.server_port,
-            SERVER_NAME         = ngx.var.server_name,
-        }
     }
 
     return setmetatable(self, mt)
@@ -153,62 +283,38 @@ function _M.close(self)
     return sock:close()
 end
 
+local function _parse_headers(str)
+    local headers = {}
 
-function _M._merge_fcgi_params(self,params)
-    for k,v in pairs(self.default_params) do
-        if not params[k] then
-            params[k] = v
+    for line in ngx_re_gmatch(str,"([^\r\n]+)") do
+        for header_pairs in ngx_re_gmatch(line[1], "([\\w\\-]+): (.+)","i") do
+            if headers[header_pairs[1]] then
+                headers[header_pairs[1]] = headers[header_pairs[1]] .. ", " .. tostring(header_pairs[2])
+            else
+                headers[header_pairs[1]] = tostring(header_pairs[2])
+            end
         end
     end
-
-    return params
+    return headers
 end
 
-
-function _M._pack_header(self,params)
-    local align = 8
-    local header = {}
-
-    params.padding_length = bit_band(-(params.content_length or 0),align - 1)
-
-    for index, field in ipairs(FCGI_HEADER_FORMAT) do
-        if params[field[1]] == nil then
-            header[index] = binutil.ntob(field[3],field[2])
-        else
-            header[index] = binutil.ntob(params[field[1]],field[2])
-        end
+-- Remove 
+local function _hide_headers(headers)
+    for _,v in ipairs(FCGI_HIDE_HEADERS) do
+        headers[v] = nil
     end
-
-    return tbl_concat(header), params.padding_length
+    return headers
 end
 
-function _M._unpack_bytes(self,format,str)
-    -- If we received nil, return nil
-    if not str then
-        return nil
-    end
-
-    local res = {}
-    local idx = 1
-
-    -- Extract bytes based on format. Convert back to number and place in res rable
-    for index, field in ipairs(format) do
-        ngx_log(ngx_DEBUG,"Unpacking ",field[1]," with length ",field[2]," from ",idx," to ",(idx + field[2]))
-        res[field[1]] = binutil.bton(str_sub(str,idx,idx + field[2] - 1))
-        idx = idx + field[2]
-    end
-
-    return res
-end
-
-
-function _M._format_params(self,params)
+local function _format_params(params)
     local new_params = ""
-    local params = params or {}
 
-    local keylen, valuelen
+    local keylen, valuelen, key, value
+
     -- Iterate over each param
-    for key,value in pairs(params) do
+    for _,pair in ipairs(params) do
+        key = pair[1]
+        value = pair[2]
         keylen = #key
         valuelen = #value
 
@@ -216,65 +322,40 @@ function _M._format_params(self,params)
         -- it as 4 bytes with high bit set to 1 (+2147483648 or FCGI_PARAM_HIGH_BIT)
         new_params = tbl_concat{
             new_params,
-            (keylen < 127) and binutil.ntob(keylen) or binutil.ntob(keylen + FCGI_PARAM_HIGH_BIT,4),
-            (valuelen < 127) and binutil.ntob(valuelen) or binutil.ntob(valuelen + FCGI_PARAM_HIGH_BIT,4),
+            (keylen < 127) and ntob(keylen) or ntob(keylen + FCGI_PARAM_HIGH_BIT,4),
+            (valuelen < 127) and ntob(valuelen) or ntob(valuelen + FCGI_PARAM_HIGH_BIT,4),
             key,
             value,
         }
     end
 
-    local start_params, padding = self:_pack_header{
+    local start_params, padding = _pack_header{
         type            = FCGI_PARAMS,
         content_length  = #new_params
     }
 
-    local end_params, _ = self:_pack_header{
-        type            = FCGI_PARAMS,
-    }
-
-    return tbl_concat{ start_params, new_params, _pad(padding), end_params }
+    return tbl_concat{ start_params, new_params, _pad(padding), FCGI_PREPACKED.end_params }
 end
 
 
-function _M._begin_request(self,fcgi_params)
-    local sock = self.sock
-
-    local header, padding = self:_pack_header{
-        type            = FCGI_BEGIN_REQUEST,
-        request_id      = 1,
-        content_length  = FCGI_HEADER_LEN,
-    }
-
-    -- We only need to do this once so no point complicating things
-    local body = tbl_concat{
-        binutil.ntob(FCGI_RESPONDER,2), -- Role, 2 bytes
-        binutil.ntob(self.keepalives and 1 or 0), -- Flags, 1 byte
-        binutil.ntob(0,5),
-    }
-
-    local params = self:_format_params(fcgi_params)
-
-    return tbl_concat{header, body, _pad(padding), params}
+local function _begin_request()
+    return FCGI_PREPACKED.begin_request_header .. FCGI_PREPACKED.begin_request_body
 end
 
-function _M.abort_request(self)
-    local header, padding = self:_pack_header{
-        type            = FCGI_ABORT_REQUEST,
-    }
 
-    local bytes, err = sock:send{ header, _pad(padding) }
-
-    if not bytes then
-        return nil, err
-    end
+local function _abort_request()
+    return FCGI_PREPACKED.abort_request
 end
 
-function _M._format_stdin(self,stdin)
+
+local function _format_stdin(stdin)
+
     local chunk_length
 
     ngx_log(ngx_DEBUG,"Stdin length is " .. #stdin)
 
     local to_send = {}
+
     local stdin_chunk = {
         "",
         "",
@@ -289,19 +370,20 @@ function _M._format_stdin(self,stdin)
         -- Max 65k data in each
         chunk_length = (#stdin > FCGI_BODY_MAX_LENGTH) and FCGI_BODY_MAX_LENGTH or #stdin
 
-        header, padding = self:_pack_header{
+        header, padding = _pack_header{
             type            = FCGI_STDIN,
             content_length  = chunk_length,
         }
-
-        ngx_log(ngx_DEBUG,"Chunk length is " .. chunk_length .. " header length is " .. #header)
 
         stdin_chunk[1] = header
         stdin_chunk[2] = str_sub(stdin,1,chunk_length)
         stdin_chunk[3] = _pad(padding)
 
+        ngx_log(ngx_DEBUG,"Chunk length is " .. chunk_length .. " header length is " .. #header .. " content length is " .. #stdin_chunk[2])
+
+
         to_send[#to_send+1] = tbl_concat(stdin_chunk)
-        stdin = str_sub(stdin,chunk_length - padding + 1) -- str:sub is inclusive of the first character 
+        stdin = str_sub(stdin,chunk_length+1) -- str:sub is inclusive of the first character so we want to chunk at the next index
     until #stdin == 0
 
     return tbl_concat(to_send)
@@ -310,15 +392,23 @@ end
 
 function _M.request(self,params)
     local sock = self.sock
-    local fcgi_params = self:_merge_fcgi_params(params.fastcgi_params)
-    local headers = params.headers
     local body = params.body or ""
 
-    local req = {
-        self:_begin_request(fcgi_params), -- Generate start of request
-        self:_format_stdin(body), -- Generate body
-    }
+    local merged_params = _merge_fcgi_params(params.fastcgi_params)
+    local http_params = params.headers
 
+    local clean_header = ""
+    for header,value in pairs(http_params) do
+        clean_header = ngx_re_gsub(str_upper(header),"-","_")
+        merged_params[#merged_params+1] = {"HTTP_" .. clean_header,value}
+    end
+
+    -- Send both of these in one packet if possible, to reduce RTT for request
+    local req = {
+        _begin_request(), -- Generate start of request
+        _format_params(merged_params), -- Generate params (HTTP / FCGI headers)
+        _format_stdin(body), -- Generate body
+    }
 
     local bytes_sent, err = sock:send(req)
 
@@ -326,50 +416,99 @@ function _M.request(self,params)
         return nil, err
     end
 
-    local res = { stdout = {}, stderr = {}, status = {}}
+    local res = { headers = {}, body = "", status = {}}
 
-    -- Read response
+    local stdout = ""
+    local stderr = ""
+
+    local reading_http_headers = true
+    local header_boundary = 0
+
+    local data = ""
+    local http_headers = ""
+
+    -- Read fastcgi records and parse
     while true do
         -- Read and unpack 8 bytes of next record header
         local header_bytes, err = sock:receive(FCGI_HEADER_LEN)
-        local header = self:_unpack_bytes(FCGI_HEADER_FORMAT,header_bytes)
+        local header = _unpack_bytes(FCGI_HEADER_FORMAT,header_bytes)
 
         if not header then
             return nil, err or "Unable to parse FCGI record header"
         end
 
-        ngx_log(ngx_DEBUG,"Reading " .. header.content_length + header.padding_length .. " bytes")
-        local data = sock:receive(header.content_length + header.padding_length)
+        -- Read data and discard padding
+        data = sock:receive(header.content_length)
+        _ = sock:receive(header.padding_length)
 
-        if not data then
-            return nil, err
-        end
-
-        -- Get data minus the padding bytes
-        data = str_sub(data,1,header.content_length)
-
-        -- Assign data to correct attr or end request
+        -- If this is a stdout packet, attempt to read and parse HTTP headers first.
+        -- Once done, read the remaining data to stdout buffer
         if header.type == FCGI_STDOUT then
-            res.stdout[#res.stdout+1] = data
+            
+            -- Attempt to find header boundary (2 x newlines)
+            found, header_boundary = ngx_re_find(data,"\\r?\\n\\r?\\n","jo")
+
+            if reading_http_headers then
+
+                -- If we can't find the header boundary in the first record, this means
+                -- it's either very long (> FCGI_BODY_MAX_LENGTH) or not formatted correctly.
+                if not found then
+                    ngx_log(ngx_ERR,"Unable to find end of HTTP header in first FCGI_STDOUT - aborting")
+                    return nil, "Error reading HTTP header"
+                end
+                -- Parse headers into table and stop attempting to parse
+                http_headers = _parse_headers(str_sub(data,1,header_boundary))
+                reading_http_headers = false
+            end
+            
+            -- Push rest of request body into stdout
+            stdout = stdout .. str_sub(data,header_boundary+1)
+
+        -- If this is stderr, read contents into stderr buffer
         elseif header.type == FCGI_STDERR then
-            res.stderr[#res.stderr+1] = data
+            stderr = stderr .. data
+
+        -- If this is end request, put buffers into result table and return
         elseif header.type == FCGI_END_REQUEST then
-            ngx_log(ngx_DEBUG,"Reading end request")
-            local stats = self:_unpack_bytes(FCGI_END_REQ_FORMAT,data)
+
+            -- Unpack EoR
+            local stats = _unpack_bytes(FCGI_END_REQ_FORMAT,data)
 
             if not stats then
-                return nil, "Unable to parse FCGI end request data"
+                return nil, "Error parsing FCGI record"
             end
 
-            res.status = stats
+            -- If we've been given a specific HTTP status, extract it
+            if http_headers['Status'] then
+                res.status = tonumber(str_sub(http_headers['Status'], 1, 3))
+                res.status_line = http_headers['Status']
+
+            -- If a HTTP location is given but no HTTP status, this is a redirect
+            elseif http_headers['Location'] then
+                res.status = 302
+                res.status_line = "302 Moved Temporarily"
+
+            -- Otherwise assume this request was OK and return 200
+            else
+                res.status = 200
+                res.status_line = "200 OK"
+            end
+
+            if #stderr > 0 then
+                ngx_log(ngx_ERR,"Fastcgi STDERR: ",stderr)
+            end
+
+            res.headers = _hide_headers(http_headers)
+            res.body = stdout
+
             return res
+
+        -- Otherwise we received an FCGI record we don't understand - ERROR
         else
-            ngx_log(ngx_DEBUG,header.type)
-            return nil, "Received unidentified FCGI record"
+            return nil, "Received unidentified FCGI record, type: " .. header.type
         end
 
     end
 end
-
 
 return _M
