@@ -96,15 +96,15 @@ local FCGI_HIDE_HEADERS = {
 
 local FCGI_DEFAULT_PARAMS = {
     {"SCRIPT_FILENAME", "document_root"},
-    {"QUERY_STRING", "query_string"},
     {"REQUEST_METHOD", "request_method"},
     {"CONTENT_TYPE", "content_type"},
     {"CONTENT_LENGTH", "content_length"},
     {"REQUEST_URI", "request_uri"},
+    {"QUERY_STRING", "args"},
     {"DOCUMENT_ROOT", "document_root"},
     {"SERVER_PROTOCOL", "server_protocol"},
-    {"GATEWAY_INTERFACE", "CGI/1.1"},
-    {"SERVER_SOFTWARE", "lua-resty-fastcgi/" .. _M._VERSION},
+    {"GATEWAY_INTERFACE", "","CGI/1.1"},
+    {"SERVER_SOFTWARE", "","lua-resty-fastcgi/" .. _M._VERSION},
     {"REMOTE_ADDR", "remote_addr"},
     {"REMOTE_PORT", "remote_port"},
     {"SERVER_ADDR", "server_addr"},
@@ -118,17 +118,20 @@ local function _merge_fcgi_params(params)
 
     local set_params = {}
     for _,v in ipairs(params) do
-        new_params[#new_params+1] = {v[1],v[2]}
-        set_params[v[1]] = true
+        if v[2] then 
+            new_params[#new_params+1] = {v[1],v[2]}
+            set_params[v[1]] = true
+        end
     end
 
     -- Populate default params if they don't exist in user params
     for _,v in ipairs(FCGI_DEFAULT_PARAMS) do
         if not set_params[v[1]] then
-            if ngx.var[v[2]] then
-                new_params[#new_params+1] = {v[1],ngx.var[v[2]]}
-            else
-                new_params[#new_params+1] = {v[1],v[2]}
+            local nginx_var = ngx.var[v[2]]
+            if v[2] ~= "" and nginx_var then
+                new_params[#new_params+1] = {v[1],nginx_var}
+            elseif v[3] then
+                new_params[#new_params+1] = {v[1],v[3]}
             end
         end
     end
@@ -185,12 +188,11 @@ local FCGI_PREPACKED = {
     end_params = _pack_header{
         type    = FCGI_PARAMS,
     },
-    begin_request_header = _pack_header{
+    begin_request = _pack_header{
         type            = FCGI_BEGIN_REQUEST,
         request_id      = 1,
         content_length  = FCGI_HEADER_LEN,
-    },
-    begin_request_body = _pack(FCGI_BEGIN_REQ_FORMAT,{
+    } .. _pack(FCGI_BEGIN_REQ_FORMAT,{
         role = FCGI_RESPONDER,
         flags = 1,
     }),
@@ -201,7 +203,6 @@ local FCGI_PREPACKED = {
 
 
 local pad = {
-    "",
     str_char(0),
     str_char(0,0),
     str_char(0,0,0),
@@ -213,7 +214,7 @@ local pad = {
 
 
 local function _pad(bytes)
-    return pad[bytes]
+    return (bytes == 0) and "" or pad[bytes]
 end
 
 
@@ -286,8 +287,8 @@ end
 local function _parse_headers(str)
     local headers = {}
 
-    for line in ngx_re_gmatch(str,"([^\r\n]+)") do
-        for header_pairs in ngx_re_gmatch(line[1], "([\\w\\-]+): (.+)","i") do
+    for line in ngx_re_gmatch(str,"[^\r\n]+","jo") do
+        for header_pairs in ngx_re_gmatch(line[0], "([\\w\\-]+)\\s*:\\s*(.+)","jo") do
             if headers[header_pairs[1]] then
                 headers[header_pairs[1]] = headers[header_pairs[1]] .. ", " .. tostring(header_pairs[2])
             else
@@ -320,13 +321,11 @@ local function _format_params(params)
 
         -- If length of field is longer than 127, we represent 
         -- it as 4 bytes with high bit set to 1 (+2147483648 or FCGI_PARAM_HIGH_BIT)
-        new_params = tbl_concat{
-            new_params,
-            (keylen < 127) and ntob(keylen) or ntob(keylen + FCGI_PARAM_HIGH_BIT,4),
-            (valuelen < 127) and ntob(valuelen) or ntob(valuelen + FCGI_PARAM_HIGH_BIT,4),
-            key,
-            value,
-        }
+        new_params = new_params ..
+            ((keylen < 127) and ntob(keylen) or ntob(keylen + FCGI_PARAM_HIGH_BIT,4)) ..
+            ((valuelen < 127) and ntob(valuelen) or ntob(valuelen + FCGI_PARAM_HIGH_BIT,4)) ..
+            key ..
+            value
     end
 
     local start_params, padding = _pack_header{
@@ -335,16 +334,6 @@ local function _format_params(params)
     }
 
     return tbl_concat{ start_params, new_params, _pad(padding), FCGI_PREPACKED.end_params }
-end
-
-
-local function _begin_request()
-    return FCGI_PREPACKED.begin_request_header .. FCGI_PREPACKED.begin_request_body
-end
-
-
-local function _abort_request()
-    return FCGI_PREPACKED.abort_request
 end
 
 
@@ -399,15 +388,15 @@ function _M.request(self,params)
 
     local clean_header = ""
     for header,value in pairs(http_params) do
-        clean_header = ngx_re_gsub(str_upper(header),"-","_")
+        clean_header = ngx_re_gsub(str_upper(header),"-","_","jo")
         merged_params[#merged_params+1] = {"HTTP_" .. clean_header,value}
     end
 
     -- Send both of these in one packet if possible, to reduce RTT for request
     local req = {
-        _begin_request(), -- Generate start of request
-        _format_params(merged_params), -- Generate params (HTTP / FCGI headers)
-        _format_stdin(body), -- Generate body
+        FCGI_PREPACKED.begin_request,   -- Generate start of request
+        _format_params(merged_params),  -- Generate params (HTTP / FCGI headers)
+        _format_stdin(body),            -- Generate body
     }
 
     local bytes_sent, err = sock:send(req)
@@ -416,16 +405,15 @@ function _M.request(self,params)
         return nil, err
     end
 
-    local res = { headers = {}, body = "", status = {}}
+    local res = { headers = {}, body = "", status = 200 }
 
     local stdout = ""
     local stderr = ""
 
-    local reading_http_headers = true
-    local header_boundary = 0
-
-    local data = ""
-    local http_headers = ""
+    local reading_http_headers  = true
+    local header_boundary       = 0
+    local data                  = ""
+    local http_headers          = ""
 
     -- Read fastcgi records and parse
     while true do
