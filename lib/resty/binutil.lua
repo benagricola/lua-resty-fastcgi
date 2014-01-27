@@ -24,7 +24,7 @@ function _M.ntob(num,bytes)
         -- Isolate current bit by anding it with mask, then shift it bytes-i right
         -- This puts it into byte '0'.
         local val = bit_rshift(bit_band(num,mask),(bytes-i)*8)
-        -- Pass it to str_char and append to table
+        -- Pass it to str_char and append to string
         str = str .. str_char(val)
         -- Shift the mask 1 byte to the left and repeat
         mask = bit_rshift(mask,8)
