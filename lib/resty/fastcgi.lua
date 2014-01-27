@@ -32,7 +32,6 @@ local _M = {
     _VERSION = '0.01',
 }
 
-
 local mt = { __index = _M }
 
 
@@ -51,7 +50,7 @@ local FCGI_GET_VALUES_RESULT  = 0x10
 local FCGI_UNKNOWN_TYPE       = 0x11
 local FCGI_MAXTYPE            = 0x11
 local FCGI_PARAM_HIGH_BIT     = 2147483648
-local FCGI_BODY_MAX_LENGTH    = 65535
+local FCGI_BODY_MAX_LENGTH    = 32768
 local FCGI_KEEP_CONN          = 0x01
 local FCGI_NO_KEEP_CONN       = 0x00
 local FCGI_NULL_REQUEST_ID    = 0x00
@@ -112,6 +111,16 @@ local FCGI_DEFAULT_PARAMS = {
     {"SERVER_NAME", "server_name"},
 }
 
+
+local FCGI_PADDING_BYTES = {
+    str_char(0),
+    str_char(0,0),
+    str_char(0,0,0),
+    str_char(0,0,0,0),
+    str_char(0,0,0,0,0),
+    str_char(0,0,0,0,0,0),
+    str_char(0,0,0,0,0,0,0),
+}
 
 local function _merge_fcgi_params(params)
     local new_params = {}
@@ -202,19 +211,8 @@ local FCGI_PREPACKED = {
 }
 
 
-local pad = {
-    str_char(0),
-    str_char(0,0),
-    str_char(0,0,0),
-    str_char(0,0,0,0),
-    str_char(0,0,0,0,0),
-    str_char(0,0,0,0,0,0),
-    str_char(0,0,0,0,0,0,0),
-}
-
-
 local function _pad(bytes)
-    return (bytes == 0) and "" or pad[bytes]
+    return (bytes == 0) and "" or FCGI_PADDING_BYTES[bytes]
 end
 
 
@@ -226,7 +224,7 @@ function _M.new(_)
 
     local self = {
         sock = sock,
-        keepalives = true,
+        keepalives = false,
     }
 
     return setmetatable(self, mt)
@@ -341,8 +339,6 @@ local function _format_stdin(stdin)
 
     local chunk_length
 
-    ngx_log(ngx_DEBUG,"Stdin length is " .. #stdin)
-
     local to_send = {}
 
     local stdin_chunk = {
@@ -367,9 +363,6 @@ local function _format_stdin(stdin)
         stdin_chunk[1] = header
         stdin_chunk[2] = str_sub(stdin,1,chunk_length)
         stdin_chunk[3] = _pad(padding)
-
-        ngx_log(ngx_DEBUG,"Chunk length is " .. chunk_length .. " header length is " .. #header .. " content length is " .. #stdin_chunk[2])
-
 
         to_send[#to_send+1] = tbl_concat(stdin_chunk)
         stdin = str_sub(stdin,chunk_length+1) -- str:sub is inclusive of the first character so we want to chunk at the next index
