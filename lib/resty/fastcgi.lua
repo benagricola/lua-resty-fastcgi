@@ -126,10 +126,10 @@ local function _merge_fcgi_params(params)
     local new_params = {}
 
     local set_params = {}
-    for _,v in ipairs(params) do
-        if v[2] then 
-            new_params[#new_params+1] = {v[1],v[2]}
-            set_params[v[1]] = true
+    for k,v in pairs(params) do
+        if v then 
+            new_params[#new_params+1] = {k,v}
+            set_params[k] = true
         end
     end
 
@@ -173,7 +173,7 @@ local function _pack_header(params)
 end
 
 
-local function _unpack_bytes(format,str)
+local function _unpack(format,str)
     -- If we received nil, return nil
     if not str then
         return nil
@@ -419,16 +419,20 @@ function _M.request(self,params)
     while true do
         -- Read and unpack 8 bytes of next record header
         local header_bytes, err = sock:receive(FCGI_HEADER_LEN)
-        local header = _unpack_bytes(FCGI_HEADER_FORMAT,header_bytes)
+        local header = _unpack(FCGI_HEADER_FORMAT,header_bytes)
 
         if not header then
             return nil, err or "Unable to parse FCGI record header"
         end
 
         -- Read data and discard padding
-        data = sock:receive(header.content_length)
+        data, err = sock:receive(header.content_length)
         _ = sock:receive(header.padding_length)
 
+        if not data then
+            return nil, err
+        end
+        
         -- If this is a stdout packet, attempt to read and parse HTTP headers first.
         -- Once done, read the remaining data to stdout buffer
         if header.type == FCGI_STDOUT then
@@ -437,7 +441,6 @@ function _M.request(self,params)
                 -- Attempt to find header boundary (2 x newlines)
                 found, header_boundary, err = ngx_re_find(data,"\\r?\\n\\r?\\n","jo")
 
-                ngx_log(ngx_ERR,"Found header boundary at ",found,":",header_boundary)
                 -- If we can't find the header boundary in the first record, this means
                 -- it's either very long (> FCGI_BODY_MAX_LENGTH) or not formatted correctly.
                 if not found then
@@ -463,7 +466,7 @@ function _M.request(self,params)
         elseif header.type == FCGI_END_REQUEST then
 
             -- Unpack EoR
-            local stats = _unpack_bytes(FCGI_END_REQ_FORMAT,data)
+            local stats = _unpack(FCGI_END_REQ_FORMAT,data)
 
             if not stats then
                 return nil, "Error parsing FCGI record"
