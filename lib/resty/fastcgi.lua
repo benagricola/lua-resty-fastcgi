@@ -183,8 +183,7 @@ local function _unpack(format,str)
     local idx = 1
 
     -- Extract bytes based on format. Convert back to number and place in res rable
-    for index, field in ipairs(format) do
-        -- ngx_log(ngx_DEBUG,"Unpacking ",field[1]," with length ",field[2]," from ",idx," to ",(idx + field[2]))
+    for _, field in ipairs(format) do
         res[field[1]] = binutil.bton(str_sub(str,idx,idx + field[2] - 1))
         idx = idx + field[2]
     end
@@ -432,7 +431,7 @@ function _M.request(self,params)
         if not data then
             return nil, err
         end
-        
+
         -- If this is a stdout packet, attempt to read and parse HTTP headers first.
         -- Once done, read the remaining data to stdout buffer
         if header.type == FCGI_STDOUT then
