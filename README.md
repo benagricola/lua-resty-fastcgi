@@ -6,7 +6,7 @@ Lua FastCGI client driver for ngx_lua based on the cosocket API.
 
 * [Status](#status)
 * [Overview](#overview)
-* [fcgi.request](#fastcgi.request)
+* [fastcgi](#fastcgi)
     * [new](#new)
     * [connect](#connect)
     * [request](#request)
