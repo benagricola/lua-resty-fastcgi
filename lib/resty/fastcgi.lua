@@ -437,6 +437,7 @@ function _M.request(self,params)
                 -- Attempt to find header boundary (2 x newlines)
                 found, header_boundary, err = ngx_re_find(data,"\\r?\\n\\r?\\n","jo")
 
+                ngx_log(ngx_ERR,"Found header boundary at ",found,":",header_boundary)
                 -- If we can't find the header boundary in the first record, this means
                 -- it's either very long (> FCGI_BODY_MAX_LENGTH) or not formatted correctly.
                 if not found then
@@ -446,10 +447,13 @@ function _M.request(self,params)
                 -- Parse headers into table and stop attempting to parse
                 http_headers = _parse_headers(str_sub(data,1,header_boundary))
                 reading_http_headers = false
+
+                -- Push rest of request body into stdout
+                stdout = stdout .. str_sub(data,(header_boundary+1))
+            else
+                stdout = stdout .. data
             end
             
-            -- Push rest of request body into stdout
-            stdout = stdout .. str_sub(data,(header_boundary or 0)+1)
 
         -- If this is stderr, read contents into stderr buffer
         elseif header.type == FCGI_STDERR then
