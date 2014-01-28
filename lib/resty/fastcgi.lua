@@ -137,10 +137,10 @@ local function _merge_fcgi_params(params)
     for _,v in ipairs(FCGI_DEFAULT_PARAMS) do
         if not set_params[v[1]] then
             local nginx_var = ngx.var[v[2]]
-            if v[2] ~= "" and nginx_var then
-                new_params[#new_params+1] = {v[1],nginx_var}
-            elseif v[3] then
-                new_params[#new_params+1] = {v[1],v[3]}
+            if v[2] ~= "" then
+                new_params[#new_params+1] = {v[1],nginx_var or ""}
+            else
+                new_params[#new_params+1] = {v[1],v[3] or ""}
             end
         end
     end
@@ -202,11 +202,15 @@ local FCGI_PREPACKED = {
         request_id      = 1,
         content_length  = FCGI_HEADER_LEN,
     } .. _pack(FCGI_BEGIN_REQ_FORMAT,{
-        role = FCGI_RESPONDER,
-        flags = 1,
+        role    = FCGI_RESPONDER,
+        flags   = 1,
     }),
     abort_request = _pack_header{
         type            = FCGI_ABORT_REQUEST,
+    },
+    empty_stdin = _pack_header{
+        type            = FCGI_STDIN,
+        content_length  = 0,
     },
 }
 
@@ -336,6 +340,9 @@ end
 
 
 local function _format_stdin(stdin)
+    if #stdin == 0 then
+        return FCGI_PREPACKED.empty_stdin
+    end
 
     local chunk_length
 
@@ -426,10 +433,9 @@ function _M.request(self,params)
         -- Once done, read the remaining data to stdout buffer
         if header.type == FCGI_STDOUT then
             
-            -- Attempt to find header boundary (2 x newlines)
-            found, header_boundary = ngx_re_find(data,"\\r?\\n\\r?\\n","jo")
-
             if reading_http_headers then
+                -- Attempt to find header boundary (2 x newlines)
+                found, header_boundary, err = ngx_re_find(data,"\\r?\\n\\r?\\n","jo")
 
                 -- If we can't find the header boundary in the first record, this means
                 -- it's either very long (> FCGI_BODY_MAX_LENGTH) or not formatted correctly.
@@ -443,7 +449,7 @@ function _M.request(self,params)
             end
             
             -- Push rest of request body into stdout
-            stdout = stdout .. str_sub(data,header_boundary+1)
+            stdout = stdout .. str_sub(data,(header_boundary or 0)+1)
 
         -- If this is stderr, read contents into stderr buffer
         elseif header.type == FCGI_STDERR then
