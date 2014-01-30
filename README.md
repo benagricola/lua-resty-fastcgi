@@ -136,6 +136,6 @@ local res_body = res.body
 ```
 
 ## TODO
- * Streaming API to work in conjunction with lua-resty-http
+ * Streaming API to work in conjunction with ledge
  * Better tests
 
