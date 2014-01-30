@@ -122,27 +122,43 @@ local FCGI_PADDING_BYTES = {
     str_char(0,0,0,0,0,0,0),
 }
 
-local function _merge_fcgi_params(params)
+local function _merge_fcgi_params(fcgi_params,http_params)
     local new_params = {}
-
     local set_params = {}
-    for k,v in pairs(params) do
-        if v then 
-            new_params[#new_params+1] = {k,v}
+
+    local idx = 1
+    for k,v in pairs(fcgi_params) do
+        if v then
+            new_params[idx] = {k,v}
             set_params[k] = true
+            idx = idx + 1
         end
     end
 
     -- Populate default params if they don't exist in user params
     for _,v in ipairs(FCGI_DEFAULT_PARAMS) do
-        if not set_params[v[1]] then
-            local nginx_var = ngx.var[v[2]]
-            if v[2] ~= "" then
-                new_params[#new_params+1] = {v[1],nginx_var or ""}
+
+        local paramname = v[1]
+        local varname   = v[2]
+        local staticval = v[3]
+
+        if not set_params[paramname] then
+
+            if varname ~= "" then
+                local nginx_var = ngx.var[varname]
+                new_params[idx] = {paramname,nginx_var or ""}
             else
-                new_params[#new_params+1] = {v[1],v[3] or ""}
+                new_params[idx] = {paramname,staticval or ""}
             end
+            idx = idx + 1
         end
+        
+    end
+
+    for header,value in pairs(http_params) do
+        clean_header = ngx_re_gsub(str_upper(header),"-","_","jo")
+        new_params[idx] = {"HTTP_" .. clean_header,value}
+        idx = idx + 1
     end
 
     return new_params
@@ -153,10 +169,14 @@ local function _pack(format,params)
     local bytes = ""
 
     for index, field in ipairs(format) do
-        if params[field[1]] == nil then
-            bytes = bytes .. ntob(field[3],field[2])
+        local fieldname = field[1]
+        local fieldlength = field[2]
+        local defaulval = field[3]
+
+        if params[fieldname] == nil then
+            bytes = bytes .. ntob(defaulval,fieldlength)
         else
-            bytes = bytes .. ntob(params[field[1]],field[2])
+            bytes = bytes .. ntob(params[fieldname],fieldlength)
         end
     end
 
@@ -184,7 +204,7 @@ local function _unpack(format,str)
 
     -- Extract bytes based on format. Convert back to number and place in res rable
     for _, field in ipairs(format) do
-        res[field[1]] = binutil.bton(str_sub(str,idx,idx + field[2] - 1))
+        res[field[1]] = bton(str_sub(str,idx,idx + field[2] - 1))
         idx = idx + field[2]
     end
 
@@ -193,24 +213,24 @@ end
 
 
 local FCGI_PREPACKED = {
-    end_params = _pack_header{
+    end_params = _pack_header({
         type    = FCGI_PARAMS,
-    },
-    begin_request = _pack_header{
+    }),
+    begin_request = _pack_header({
         type            = FCGI_BEGIN_REQUEST,
         request_id      = 1,
         content_length  = FCGI_HEADER_LEN,
-    } .. _pack(FCGI_BEGIN_REQ_FORMAT,{
+    }) .. _pack(FCGI_BEGIN_REQ_FORMAT,{
         role    = FCGI_RESPONDER,
         flags   = 1,
     }),
-    abort_request = _pack_header{
+    abort_request = _pack_header({
         type            = FCGI_ABORT_REQUEST,
-    },
-    empty_stdin = _pack_header{
+    }),
+    empty_stdin = _pack_header({
         type            = FCGI_STDIN,
         content_length  = 0,
-    },
+    }),
 }
 
 
@@ -228,6 +248,8 @@ function _M.new(_)
     local self = {
         sock = sock,
         keepalives = false,
+        buffer = {},
+        buffer_length = 1024,
     }
 
     return setmetatable(self, mt)
@@ -285,22 +307,25 @@ function _M.close(self)
     return sock:close()
 end
 
+
 local function _parse_headers(str)
     local headers = {}
 
     for line in ngx_re_gmatch(str,"[^\r\n]+","jo") do
         for header_pairs in ngx_re_gmatch(line[0], "([\\w\\-]+)\\s*:\\s*(.+)","jo") do
-            if headers[header_pairs[1]] then
-                headers[header_pairs[1]] = headers[header_pairs[1]] .. ", " .. tostring(header_pairs[2])
+            local header_name   = header_pairs[1]
+            local header_value  = header_pairs[2]
+            if headers[header_name] then
+                headers[header_name] = headers[header_name] .. ", " .. tostring(header_value)
             else
-                headers[header_pairs[1]] = tostring(header_pairs[2])
+                headers[header_name] = tostring(header_value)
             end
         end
     end
     return headers
 end
 
--- Remove 
+
 local function _hide_headers(headers)
     for _,v in ipairs(FCGI_HIDE_HEADERS) do
         headers[v] = nil
@@ -308,33 +333,37 @@ local function _hide_headers(headers)
     return headers
 end
 
-local function _format_params(params)
-    local new_params = ""
 
-    local keylen, valuelen, key, value
+local function _format_params(params)
+    local new_params = {}
+    local idx = 1
 
     -- Iterate over each param
     for _,pair in ipairs(params) do
-        key = pair[1]
-        value = pair[2]
-        keylen = #key
-        valuelen = #value
+        local key = pair[1]
+        local value = pair[2]
+        local keylen = #key
+        local valuelen = #value
 
         -- If length of field is longer than 127, we represent 
         -- it as 4 bytes with high bit set to 1 (+2147483648 or FCGI_PARAM_HIGH_BIT)
-        new_params = new_params ..
-            ((keylen < 127) and ntob(keylen) or ntob(keylen + FCGI_PARAM_HIGH_BIT,4)) ..
-            ((valuelen < 127) and ntob(valuelen) or ntob(valuelen + FCGI_PARAM_HIGH_BIT,4)) ..
-            key ..
-            value
+        new_params[idx] = tbl_concat({
+            ((keylen < 127) and ntob(keylen) or ntob(keylen + FCGI_PARAM_HIGH_BIT,4)),
+            ((valuelen < 127) and ntob(valuelen) or ntob(valuelen + FCGI_PARAM_HIGH_BIT,4)),
+            key,
+            value,
+        })
+        idx = idx + 1
     end
 
-    local start_params, padding = _pack_header{
-        type            = FCGI_PARAMS,
-        content_length  = #new_params
-    }
+    local new_params_str = tbl_concat(new_params)
 
-    return tbl_concat{ start_params, new_params, _pad(padding), FCGI_PREPACKED.end_params }
+    local start_params, padding = _pack_header({
+        type            = FCGI_PARAMS,
+        content_length  = #new_params_str
+    })
+
+    return tbl_concat({ start_params, new_params_str, _pad(padding), FCGI_PREPACKED.end_params })
 end
 
 
@@ -355,26 +384,173 @@ local function _format_stdin(stdin)
 
     local header = ""
     local padding = 0
+    local idx = 1
 
     repeat
-        -- While we still have stdin data, build up STDIN record
-        -- Max 65k data in each
+        -- While we still have stdin data, build up STDIN record in chunks
         chunk_length = (#stdin > FCGI_BODY_MAX_LENGTH) and FCGI_BODY_MAX_LENGTH or #stdin
 
-        header, padding = _pack_header{
+        header, padding = _pack_header({
             type            = FCGI_STDIN,
             content_length  = chunk_length,
-        }
+        })
 
         stdin_chunk[1] = header
         stdin_chunk[2] = str_sub(stdin,1,chunk_length)
         stdin_chunk[3] = _pad(padding)
 
-        to_send[#to_send+1] = tbl_concat(stdin_chunk)
-        stdin = str_sub(stdin,chunk_length+1) -- str:sub is inclusive of the first character so we want to chunk at the next index
+        to_send[idx] = tbl_concat(stdin_chunk)
+        stdin = str_sub(stdin,chunk_length+1)
+        idx = idx + 1
     until #stdin == 0
 
     return tbl_concat(to_send)
+end
+
+
+function _M.get_response_reader(self,chunksize)
+    local sock              = self.sock
+    local chunksize         = chunksize or 65536
+
+    local buffer            = self.buffer
+    local header            = self.buffer_header
+    local buffer_size       = #buffer
+
+    -- Set start values to be whatever the current buffer 
+    -- header holds, if any.
+    local record_type       = header.type or FCGI_STDOUT
+    local content_length    = header.content_length or 0
+    local padding_length    = header.padding_length or 0
+
+
+    return function()
+
+        local res = { stdout = "", stderr = ""}
+        local err, header_bytes, bytes_to_read
+        local bytes_read    = 0
+        local buffered_data = ""
+        local socket_data   = ""
+
+        -- If we don't have a length of data to read yet, attempt to read a FCGI record header
+        if not record_type then
+            ngx_log(ngx_DEBUG,"Attempting to grab next FCGI record")
+            local header_bytes, err = sock:receive(FCGI_HEADER_LEN)
+            local header = _unpack(FCGI_HEADER_FORMAT,header_bytes)
+
+            if not header then
+                return nil, err or "Unable to parse FCGI record header"
+            end
+
+            record_type = header.type
+            content_length = header.content_length
+            padding_length = header.padding_length
+
+            ngx_log(ngx_DEBUG,"New content length is ",content_length," padding ",padding_length)
+
+            -- If we've reached the end of the request, return nil
+            if record_type == FCGI_END_REQUEST then
+                ngx_log(ngx_DEBUG,"Attempting to read end request")
+                read_bytes, err = sock:receive(content_length)
+
+                if not read_bytes then
+                    return nil, err or "Unable to parse FCGI end request body"
+                end
+
+                return nil -- TODO: Return end request format correctly without breaking
+            end
+        end
+
+        -- Calculate maximum readable buffer size
+        bytes_to_read = (chunksize >= content_length) and content_length or chunksize
+        
+        if buffer_size > 0 then
+            ngx_log(ngx_DEBUG,"We have ",buffer_size," bytes of buffered data and need to read ",bytes_to_read)
+
+            -- If we have buffered data but not enough, read remaining from socket
+            if bytes_to_read >= buffer_size then 
+                bytes_to_read   = bytes_to_read - buffer_size
+                buffered_data   = buffer
+                bytes_read      = bytes_read + buffer_size
+                buffer_size     = 0
+                buffer          = ""
+                ngx_log(ngx_DEBUG,"Read ",bytes_read," bytes of data and reset buffer size to 0")
+
+            -- Otherwise read what we need out of buffer and update all related vars
+            else
+                bytes_read      = bytes_read + bytes_to_read
+                buffer_size     = buffer_size - bytes_to_read
+                buffered_data   = str_sub(buffer,1,bytes_to_read)
+                buffer          = str_sub(buffer,bytes_to_read+1)
+                ngx_log(ngx_DEBUG,"Read ",bytes_read," bytes of data and left ",buffer_size," bytes in buffer")
+            end
+        end
+
+        if bytes_to_read > 0 then
+            socket_data, err = sock:receive(bytes_to_read)
+
+            if not socket_data then
+                return nil, err or "Unable to retrieve request body"
+            end
+
+            bytes_read = bytes_read + bytes_to_read
+        end
+
+        -- Reduce content_length by the amount that we've read so far
+        content_length = content_length - bytes_read
+        ngx_log(ngx_DEBUG,"Reducing content length by ", bytes_read," bytes to ",content_length)
+
+        -- Place received data into correct result attribute based on record type
+        if record_type == FCGI_STDOUT then
+            res.stdout = tbl_concat({buffered_data,socket_data})
+        elseif record_type == FCGI_STDERR then
+            res.stderr = tbl_concat({buffered_data,socket_data})
+        else
+            return nil, err or "Attempted to receive an unknown FCGI record"
+        end
+
+        -- If we've read all of the data that we have 'available' in this record, then start again
+        -- by attempting to parse another record the next time this function is called.
+        if content_length == 0 then
+            _ = sock:receive(padding_length)
+            ngx_log(ngx_DEBUG,"Resetting record type")
+            record_type = nil
+        end
+
+        return res, nil
+    end
+
+end
+
+
+function _M.request_simple(self,params)
+    local res, err = self:request(params)
+
+    if not res then
+        return nil, err
+    end
+
+    local body_reader = self:get_response_reader()
+
+    local chunks = {}
+    local idx = 1
+    
+    local chunk, err
+    repeat
+        chunk, err = body_reader()
+
+        if err then
+            return nil, err, tbl_concat(chunks)
+        end
+
+        if chunk then
+            chunks[idx] = chunk.stdout
+            idx = idx + 1
+        end
+    until not chunk
+
+    res.body = tbl_concat(chunks)
+
+    return res, err
 end
 
 
@@ -382,14 +558,10 @@ function _M.request(self,params)
     local sock = self.sock
     local body = params.body or ""
 
-    local merged_params = _merge_fcgi_params(params.fastcgi_params)
+    local merged_params = _merge_fcgi_params(params.fastcgi_params,params.headers)
     local http_params = params.headers
 
     local clean_header = ""
-    for header,value in pairs(http_params) do
-        clean_header = ngx_re_gsub(str_upper(header),"-","_","jo")
-        merged_params[#merged_params+1] = {"HTTP_" .. clean_header,value}
-    end
 
     -- Send both of these in one packet if possible, to reduce RTT for request
     local req = {
@@ -406,102 +578,69 @@ function _M.request(self,params)
 
     local res = { headers = {}, body = "", status = 200 }
 
-    local stdout = ""
-    local stderr = ""
 
-    local reading_http_headers  = true
-    local header_boundary       = 0
-    local data                  = ""
-    local http_headers          = ""
+    -- Read and unpack 8 bytes of first received record
+    local header_bytes, err = sock:receive(FCGI_HEADER_LEN)
+    local header = _unpack(FCGI_HEADER_FORMAT,header_bytes)
 
-    -- Read fastcgi records and parse
-    while true do
-        -- Read and unpack 8 bytes of next record header
-        local header_bytes, err = sock:receive(FCGI_HEADER_LEN)
-        local header = _unpack(FCGI_HEADER_FORMAT,header_bytes)
-
-        if not header then
-            return nil, err or "Unable to parse FCGI record header"
-        end
-
-        -- Read data and discard padding
-        data, err = sock:receive(header.content_length)
-        _ = sock:receive(header.padding_length)
-
-        if not data then
-            return nil, err
-        end
-
-        -- If this is a stdout packet, attempt to read and parse HTTP headers first.
-        -- Once done, read the remaining data to stdout buffer
-        if header.type == FCGI_STDOUT then
-            
-            if reading_http_headers then
-                -- Attempt to find header boundary (2 x newlines)
-                found, header_boundary, err = ngx_re_find(data,"\\r?\\n\\r?\\n","jo")
-
-                -- If we can't find the header boundary in the first record, this means
-                -- it's either very long (> FCGI_BODY_MAX_LENGTH) or not formatted correctly.
-                if not found then
-                    ngx_log(ngx_ERR,"Unable to find end of HTTP header in first FCGI_STDOUT - aborting")
-                    return nil, "Error reading HTTP header"
-                end
-                -- Parse headers into table and stop attempting to parse
-                http_headers = _parse_headers(str_sub(data,1,header_boundary))
-                reading_http_headers = false
-
-                -- Push rest of request body into stdout
-                stdout = stdout .. str_sub(data,(header_boundary+1))
-            else
-                stdout = stdout .. data
-            end
-            
-
-        -- If this is stderr, read contents into stderr buffer
-        elseif header.type == FCGI_STDERR then
-            stderr = stderr .. data
-
-        -- If this is end request, put buffers into result table and return
-        elseif header.type == FCGI_END_REQUEST then
-
-            -- Unpack EoR
-            local stats = _unpack(FCGI_END_REQ_FORMAT,data)
-
-            if not stats then
-                return nil, "Error parsing FCGI record"
-            end
-
-            -- If we've been given a specific HTTP status, extract it
-            if http_headers['Status'] then
-                res.status = tonumber(str_sub(http_headers['Status'], 1, 3))
-                res.status_line = http_headers['Status']
-
-            -- If a HTTP location is given but no HTTP status, this is a redirect
-            elseif http_headers['Location'] then
-                res.status = 302
-                res.status_line = "302 Moved Temporarily"
-
-            -- Otherwise assume this request was OK and return 200
-            else
-                res.status = 200
-                res.status_line = "200 OK"
-            end
-
-            if #stderr > 0 then
-                ngx_log(ngx_ERR,"Fastcgi STDERR: ",stderr)
-            end
-
-            res.headers = _hide_headers(http_headers)
-            res.body = stdout
-
-            return res
-
-        -- Otherwise we received an FCGI record we don't understand - ERROR
-        else
-            return nil, "Received unidentified FCGI record, type: " .. header.type
-        end
-
+    if not header then
+        return nil, err or "Unable to parse FCGI record header"
     end
+
+    -- Read up to buffer_length bytes straight out in which to look for headers.
+    local buffer_length = self.buffer_length
+    local header_content_length = header.content_length
+    local read_bytes = (header_content_length <= buffer_length) and header_content_length or buffer_length
+
+    ngx_log(ngx_DEBUG,"Reading ",read_bytes," bytes for buffer")
+    data, err = sock:receive(read_bytes)
+
+    if not data then
+        return nil, err
+    end
+
+    -- Attempt to find header boundary (2 x newlines)
+    found, header_boundary, err = ngx_re_find(data,"\\r?\\n\\r?\\n","jo")
+
+    -- If we can't find the header boundary  then return an error
+    if not found then
+        ngx_log(ngx_ERR,"Unable to find end of HTTP header in first ",buffer_length," bytes - aborting")
+        return nil, "Error reading HTTP header"
+    end
+
+    -- Parse headers into table
+    http_headers = _parse_headers(str_sub(data,1,header_boundary))
+    header.content_length = header.content_length - header_boundary
+
+    ngx_log(ngx_DEBUG,"Header boundary found at ",header_boundary)
+
+    -- Add remaining data to buffer for use by streaming reader
+    self.buffer  = str_sub(data,header_boundary+1)
+    self.buffer_header = header
+
+    local status_header = http_headers['Status']
+
+    -- If we've been given a specific HTTP status, extract it
+    if status_header then
+        res.status = tonumber(str_sub(status_header, 1, 3))
+        res.status_line = status_header
+
+    -- If a HTTP location is given but no HTTP status, this is a redirect
+    elseif http_headers['Location'] then
+        res.status = 302
+        res.status_line = "302 Moved Temporarily"
+
+    -- Otherwise assume this request was OK and return 200
+    else
+        res.status = 200
+        res.status_line = "200 OK"
+    end
+
+    res.headers = _hide_headers(http_headers)
+
+    -- At this point we've read the HTTP headers and can use get_response_reader() to return an iterator for streaming.
+    return res
+
 end
 
 return _M

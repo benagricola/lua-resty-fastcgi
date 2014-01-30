@@ -65,7 +65,7 @@ __DATA__
 
             fcgic:set_timeout(60000)
 
-            local res, err = fcgic:request{
+            local res, err = fcgic:request_simple{
               fastcgi_params = {
                 SCRIPT_FILENAME = "/foo/bar",
                 SCRIPT_NAME = "/",
@@ -112,7 +112,7 @@ $::standard_query_request
 
             fcgic:set_timeout(60000)
 
-            local res, err = fcgic:request{
+            local res, err = fcgic:request_simple{
               fastcgi_params = {
                 SCRIPT_FILENAME = "/foo/bar",
                 SCRIPT_NAME = "/",
@@ -168,7 +168,7 @@ $::standard_request_packed
 
             fcgic:set_timeout(60000)
 
-            local res, err = fcgic:request{
+            local res, err = fcgic:request_simple{
               fastcgi_params = {
                 SCRIPT_FILENAME = "/foo/bar",
                 SCRIPT_NAME = "/",
@@ -185,6 +185,7 @@ $::standard_request_packed
             
             if not res then
               ngx.status = 500
+              ngx.say(err)
               ngx.exit(500)
             end
 
