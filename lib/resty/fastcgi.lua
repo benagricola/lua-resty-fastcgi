@@ -479,6 +479,7 @@ function _M.get_response_reader(self,chunksize)
             else
                 bytes_read      = bytes_read + bytes_to_read
                 buffer_size     = buffer_size - bytes_to_read
+                bytes_to_read   = 0
                 buffered_data   = str_sub(buffer,1,bytes_to_read)
                 buffer          = str_sub(buffer,bytes_to_read+1)
                 ngx_log(ngx_DEBUG,"Read ",bytes_read," bytes of data and left ",buffer_size," bytes in buffer")
