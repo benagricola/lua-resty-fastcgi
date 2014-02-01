@@ -274,40 +274,6 @@ local function _hide_headers(headers)
 end
 
 
-local function _parse_headers(str)
-
-    -- Only look in the first header_buffer_len bytes
-    local header_buffer_len = 1024
-    local header_buffer = str_sub(str,1,header_buffer_len)
-    local found, header_boundary
-
-    -- Find header boundary
-    found, header_boundary, err = ngx_re_find(header_buffer,"\\r?\\n\\r?\\n","jo")
-
-    -- If we can't find the header boundary  then return an error
-    if not found then
-        ngx_log(ngx_ERR,"Unable to find end of HTTP header in first ",header_buffer_len," bytes - aborting")
-        return nil, "Error reading HTTP header"
-    end
-
-    local http_headers = {}
-
-    for line in ngx_re_gmatch(str_sub(header_buffer,1,header_boundary),"[^\r\n]+","jo") do
-        for header_pairs in ngx_re_gmatch(line[0], "([\\w\\-]+)\\s*:\\s*(.+)","jo") do
-            local header_name   = header_pairs[1]
-            local header_value  = header_pairs[2]
-            if http_headers[header_name] then
-                http_headers[header_name] = http_headers[header_name] .. ", " .. tostring(header_value)
-            else
-                http_headers[header_name] = tostring(header_value)
-            end
-        end
-    end
-
-    return http_headers, str_sub(str,header_boundary+1)
-end
-
-
 local function _format_params(params)
     local new_params = {}
     local idx = 1
@@ -379,6 +345,41 @@ local function _format_stdin(stdin)
     until #stdin == 0
 
     return tbl_concat(to_send)
+end
+
+
+
+function _M.parse_headers(self,str)
+
+    -- Only look in the first header_buffer_len bytes
+    local header_buffer_len = 1024
+    local header_buffer = str_sub(str,1,header_buffer_len)
+    local found, header_boundary
+
+    -- Find header boundary
+    found, header_boundary, err = ngx_re_find(header_buffer,"\\r?\\n\\r?\\n","jo")
+
+    -- If we can't find the header boundary  then return an error
+    if not found then
+        ngx_log(ngx_ERR,"Unable to find end of HTTP header in first ",header_buffer_len," bytes - aborting")
+        return nil, "Error reading HTTP header"
+    end
+
+    local http_headers = {}
+
+    for line in ngx_re_gmatch(str_sub(header_buffer,1,header_boundary),"[^\r\n]+","jo") do
+        for header_pairs in ngx_re_gmatch(line[0], "([\\w\\-]+)\\s*:\\s*(.+)","jo") do
+            local header_name   = header_pairs[1]
+            local header_value  = header_pairs[2]
+            if http_headers[header_name] then
+                http_headers[header_name] = http_headers[header_name] .. ", " .. tostring(header_value)
+            else
+                http_headers[header_name] = tostring(header_value)
+            end
+        end
+    end
+
+    return http_headers, str_sub(str,header_boundary+1)
 end
 
 
@@ -490,7 +491,7 @@ function _M.request_simple(self,params)
     local body = tbl_concat(chunks)
 
 
-    local http_headers, body = _parse_headers(body)
+    local http_headers, body = self:parse_headers(body)
     local status_header = http_headers['Status']
 
     local res = { body = "", headers = {}, status = 200}
