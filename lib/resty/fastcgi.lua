@@ -287,9 +287,24 @@ local function _format_params(params)
 
         -- If length of field is longer than 127, we represent 
         -- it as 4 bytes with high bit set to 1 (+2147483648 or FCGI_PARAM_HIGH_BIT)
+
+        local keylen_b, valuelen_b
+
+        if keylen < 127 then
+            keylen_b = ntob(keylen)
+        else
+            keylen_b = ntob(keylen + FCGI_PARAM_HIGH_BIT,4)
+        end
+
+        if valuelen < 127 then
+            valuelen_b = ntob(valuelen)
+        else
+            valuelen_b = ntob(valuelen + FCGI_PARAM_HIGH_BIT,4)
+        end
+
         new_params[idx] = tbl_concat({
-            ((keylen < 127) and ntob(keylen) or ntob(keylen + FCGI_PARAM_HIGH_BIT,4)),
-            ((valuelen < 127) and ntob(valuelen) or ntob(valuelen + FCGI_PARAM_HIGH_BIT,4)),
+            keylen_b,
+            valuelen_b,
             key,
             value,
         })
@@ -308,7 +323,8 @@ end
 
 
 local function _format_stdin(stdin)
-    if #stdin == 0 then
+    local stdin_length = #stdin
+    if stdin_length == 0 then
         return FCGI_PREPACKED.empty_stdin
     end
 
@@ -328,7 +344,11 @@ local function _format_stdin(stdin)
 
     repeat
         -- While we still have stdin data, build up STDIN record in chunks
-        chunk_length = (#stdin > FCGI_BODY_MAX_LENGTH) and FCGI_BODY_MAX_LENGTH or #stdin
+        if stdin_length > FCGI_BODY_MAX_LENGTH then
+            chunk_length = FCGI_BODY_MAX_LENGTH
+        else
+            chunk_length = strin_length
+        end 
 
         header, padding = _pack_header({
             type            = FCGI_STDIN,
@@ -393,7 +413,7 @@ function _M.get_response_reader(self)
     return function(chunksize)
         local chunksize = chunksize or 65536
         local res = { stdout = "", stderr = ""}
-        local err, header_bytes, bytes_to_read, data
+        local data, err, partial, header_bytes, bytes_to_read
 
         -- If we don't have a length of data to read yet, attempt to read a FCGI record header
         if not record_type then
@@ -414,9 +434,9 @@ function _M.get_response_reader(self)
             -- If we've reached the end of the request, return nil
             if record_type == FCGI_END_REQUEST then
                 ngx_log(ngx_DEBUG,"Attempting to read end request")
-                read_bytes, err = sock:receive(content_length)
+                read_bytes, err, partial = sock:receive(content_length)
 
-                if not read_bytes then
+                if not read_bytes or partial then
                     return nil, err or "Unable to parse FCGI end request body"
                 end
 
@@ -425,14 +445,18 @@ function _M.get_response_reader(self)
         end
 
         -- Calculate maximum readable buffer size
-        bytes_to_read = (chunksize >= content_length) and content_length or chunksize
+        if chunksize >= content_length then
+            bytes_to_read = content_length
+        else
+            bytes_to_read = chunksize
+        end
 
         -- If we have any bytes to read, read these now
         if bytes_to_read > 0 then
-            data, err = sock:receive(bytes_to_read)
+            data, err, partial = sock:receive(bytes_to_read)
 
             if not data then
-                return nil, err or "Unable to retrieve request body"
+                return nil, err or "Unable to retrieve request body", partial
             end
 
             -- Reduce content_length by the amount that we've read so far
@@ -476,7 +500,7 @@ function _M.request_simple(self,params)
     local chunk
 
     repeat
-        chunk, err = body_reader()
+        chunk, err, partial = body_reader()
 
         if err then
             return nil, err, tbl_concat(chunks)
