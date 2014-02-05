@@ -102,34 +102,14 @@ local FCGI_PADDING_BYTES = {
     str_char(0,0,0,0,0,0,0),
 }
 
-local function _merge_params(fcgi_params,http_params)
-    local new_params = {}
-
-    local idx = 1
-    for k,v in pairs(fcgi_params) do
-        if v then
-            new_params[idx] = {k,v}
-            idx = idx + 1
-        end
-    end
-
-    for header,value in pairs(http_params) do
-        clean_header = ngx_re_gsub(str_upper(header),"-","_","jo")
-        new_params[idx] = {"HTTP_" .. clean_header,value}
-        idx = idx + 1
-    end
-
-    return new_params
-end
-
 
 local function _pack(format,params)
     local bytes = ""
 
     for index, field in ipairs(format) do
-        local fieldname = field[1]
-        local fieldlength = field[2]
-        local defaulval = field[3]
+        local fieldname     = field[1]
+        local fieldlength   = field[2]
+        local defaulval     = field[3]
 
         if params[fieldname] == nil then
             bytes = bytes .. ntob(defaulval,fieldlength)
@@ -144,10 +124,8 @@ end
 
 local function _pack_header(params)
     local align = 8
-
     params.padding_length = bit_band(-(params.content_length or 0),align - 1)
-    local header = _pack(FCGI_HEADER_FORMAT,params)
-    return header, params.padding_length
+    return _pack(FCGI_HEADER_FORMAT,params), params.padding_length
 end
 
 
@@ -157,8 +135,7 @@ local function _unpack(format,str)
         return nil
     end
 
-    local res = {}
-    local idx = 1
+    local res, idx = {}, 1
 
     -- Extract bytes based on format. Convert back to number and place in res rable
     for _, field in ipairs(format) do
@@ -193,7 +170,11 @@ local FCGI_PREPACKED = {
 
 
 local function _pad(bytes)
-    return (bytes == 0) and "" or FCGI_PADDING_BYTES[bytes]
+    if bytes == 0 then
+        return ""
+    else
+        return FCGI_PADDING_BYTES[bytes]
+    end
 end
 
 
@@ -204,10 +185,10 @@ function _M.new(_)
     end
 
     local self = {
-        sock = sock,
-        keepalives = false,
-        buffer = {},
-        buffer_length = 1024,
+        sock            = sock,
+        keepalives      = false,
+        buffer          = {},
+        buffer_length   = 1024,
     }
 
     return setmetatable(self, mt)
@@ -275,15 +256,13 @@ end
 
 
 local function _format_params(params)
-    local new_params = {}
-    local idx = 1
+    local new_params, idx = {}, 1
 
     -- Iterate over each param
-    for _,pair in ipairs(params) do
-        local key = pair[1]
-        local value = pair[2]
-        local keylen = #key
-        local valuelen = #value
+    for key,value in pairs(params) do
+
+        local keylen    = #key
+        local valuelen  = #value
 
         -- If length of field is longer than 127, we represent 
         -- it as 4 bytes with high bit set to 1 (+2147483648 or FCGI_PARAM_HIGH_BIT)
@@ -308,6 +287,7 @@ local function _format_params(params)
             key,
             value,
         })
+
         idx = idx + 1
     end
 
@@ -329,25 +309,17 @@ local function _format_stdin(stdin)
     end
 
     local chunk_length
+    local to_send, stdin_chunk, header = {}, {"","",""}, ""
+    local padding, idx = 0, 1
 
-    local to_send = {}
-
-    local stdin_chunk = {
-        "",
-        "",
-        ""
-    }
-
-    local header = ""
-    local padding = 0
-    local idx = 1
-
+    -- We could potentially need to send more than one records' worth of data, so
+    -- loop to format.
     repeat
         -- While we still have stdin data, build up STDIN record in chunks
         if stdin_length > FCGI_BODY_MAX_LENGTH then
             chunk_length = FCGI_BODY_MAX_LENGTH
         else
-            chunk_length = strin_length
+            chunk_length = stdin_length
         end 
 
         header, padding = _pack_header({
@@ -368,38 +340,35 @@ local function _format_stdin(stdin)
 end
 
 
+local function _send_stdin(sock,stdin)
+    if type(stdin) == 'function' then
+        repeat
+            local chunk, err, partial = stdin()
 
-function _M.parse_headers(self,str)
-
-    -- Only look in the first header_buffer_len bytes
-    local header_buffer_len = 1024
-    local header_buffer = str_sub(str,1,header_buffer_len)
-    local found, header_boundary
-
-    -- Find header boundary
-    found, header_boundary, err = ngx_re_find(header_buffer,"\\r?\\n\\r?\\n","jo")
-
-    -- If we can't find the header boundary  then return an error
-    if not found then
-        ngx_log(ngx_ERR,"Unable to find end of HTTP header in first ",header_buffer_len," bytes - aborting")
-        return nil, "Error reading HTTP header"
-    end
-
-    local http_headers = {}
-
-    for line in ngx_re_gmatch(str_sub(header_buffer,1,header_boundary),"[^\r\n]+","jo") do
-        for header_pairs in ngx_re_gmatch(line[0], "([\\w\\-]+)\\s*:\\s*(.+)","jo") do
-            local header_name   = header_pairs[1]
-            local header_value  = header_pairs[2]
-            if http_headers[header_name] then
-                http_headers[header_name] = http_headers[header_name] .. ", " .. tostring(header_value)
-            else
-                http_headers[header_name] = tostring(header_value)
+            -- If the iterator returns nil, then we have no more stdin
+            -- Send an empty stdin record to signify the end of the request
+            if not chunk and not err then
+                 local ok,err = sock:send(_format_stdin(""))
+            -- If we have a chunk, then format and send it
+            elseif chunk then 
+                local ok,err = sock:send(_format_stdin(chunk))
+            -- Otherwise iterator errored, return
+            elseif err ~= nil then
+                return nil, err, partial
             end
+
+            if not ok then
+                return nil, err
+            end
+
+        until chunk == nil
+    elseif stdin ~= nil then
+        local bytes, err = sock:send(_format_stdin(stdin))
+        if not bytes then
+            return nil, err
         end
     end
-
-    return http_headers, str_sub(str,header_boundary+1)
+    return true, nil
 end
 
 
@@ -409,10 +378,9 @@ function _M.get_response_reader(self)
     local content_length    = 0
     local padding_length    = 0
 
-
-    return function(chunksize)
-        local chunksize = chunksize or 65536
-        local res = { stdout = "", stderr = ""}
+    return function(chunk_size)
+        local chunk_size = chunk_size or 65536
+        local res = { stdout = nil, stderr = nil}
         local data, err, partial, header_bytes, bytes_to_read
 
         -- If we don't have a length of data to read yet, attempt to read a FCGI record header
@@ -445,10 +413,10 @@ function _M.get_response_reader(self)
         end
 
         -- Calculate maximum readable buffer size
-        if chunksize >= content_length then
+        if chunk_size >= content_length then
             bytes_to_read = content_length
         else
-            bytes_to_read = chunksize
+            bytes_to_read = chunk_size
         end
 
         -- If we have any bytes to read, read these now
@@ -487,80 +455,27 @@ function _M.get_response_reader(self)
 end
 
 
-function _M.request_simple(self,params)
-    local bytes, err = self:request(params)
-    if not bytes then
-        return nil, err
-    end
+function _M.request(self,parameters)
+    local sock      = self.sock
+    local stdin     = parameters.stdin
+    local params    = parameters.params
 
-    local body_reader = self:get_response_reader()
-
-    local chunks = {}
-    local idx = 1
-    local chunk
-
-    repeat
-        chunk, err, partial = body_reader()
-
-        if err then
-            return nil, err, tbl_concat(chunks)
-        end
-
-        if chunk then
-            chunks[idx] = chunk.stdout
-            idx = idx + 1
-        end
-    until not chunk
-
-    local body = tbl_concat(chunks)
-
-
-    local http_headers, body = self:parse_headers(body)
-    local status_header = http_headers['Status']
-
-    local res = { body = "", headers = {}, status = 200}
-
-    -- If we've been given a specific HTTP status, extract it
-    if status_header then
-        res.status = tonumber(str_sub(status_header, 1, 3))
-        res.status_line = status_header
-
-    -- If a HTTP location is given but no HTTP status, this is a redirect
-    elseif http_headers['Location'] then
-        res.status = 302
-        res.status_line = "302 Moved Temporarily"
-
-    -- Otherwise assume this request was OK and return 200
-    else
-        res.status = 200
-        res.status_line = "200 OK"
-    end
-
-    res.headers = _hide_headers(http_headers)
-
-    res.body = body
-
-    return res, err
-end
-
-
-function _M.request(self,params)
-    local sock = self.sock
-    local body = params.body or ""
-
-    local merged_params = _merge_params(params.fastcgi_params,params.headers)
-
-    -- Send both of these in one packet if possible, to reduce RTT for request
+    -- Build request
     local req = {
         FCGI_PREPACKED.begin_request,   -- Generate start of request
-        _format_params(merged_params),  -- Generate params (HTTP / FCGI headers)
-        _format_stdin(body),            -- Generate body
+        _format_params(params),         -- Generate params (HTTP / FCGI headers)
     }
 
-    local bytes_sent, err = sock:send(req)
-
+    -- Send request
+    local bytes_sent, err, partial = sock:send(req)
     if not bytes_sent then
-        return nil, err
+        return nil, err, partial
+    end
+
+    -- Send body if any
+    local ok, err, partial = _send_stdin(sock, stdin)
+    if not ok then
+        return nil, err, partial
     end
 
     return bytes_sent, nil
