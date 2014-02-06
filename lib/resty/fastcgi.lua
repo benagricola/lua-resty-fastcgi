@@ -264,7 +264,6 @@ local function _format_params(params)
         local keylen    = #key
         local valuelen  = #value
 
-        ngx_log(ngx_ERR,"Keylen: ",keylen," Valuelen: ", valuelen)
         -- If length of field is longer than 127, we represent 
         -- it as 4 bytes with high bit set to 1 (+2147483648 or FCGI_PARAM_HIGH_BIT)
 
@@ -272,18 +271,14 @@ local function _format_params(params)
 
         if keylen <= 127 then
             keylen_b = ntob(keylen)
-            ngx_log(ngx_ERR,"Key 1b")
         else
             keylen_b = ntob(keylen + FCGI_PARAM_HIGH_BIT,4)
-            ngx_log(ngx_ERR,"Key 4b")
         end
 
         if valuelen <= 127 then
             valuelen_b = ntob(valuelen)
-            ngx_log(ngx_ERR,"Value 1b")
         else
             valuelen_b = ntob(valuelen + FCGI_PARAM_HIGH_BIT,4)
-            ngx_log(ngx_ERR,"Value 4b")
         end
 
         new_params[idx] = tbl_concat({
@@ -298,7 +293,6 @@ local function _format_params(params)
 
     local new_params_str = tbl_concat(new_params)
 
-    ngx_log(ngx_ERR,"Length: ",#new_params_str)
     local start_params, padding = _pack_header({
         type            = FCGI_PARAMS,
         content_length  = #new_params_str
