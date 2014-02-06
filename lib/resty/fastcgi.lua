@@ -264,21 +264,26 @@ local function _format_params(params)
         local keylen    = #key
         local valuelen  = #value
 
+        ngx_log(ngx_ERR,"Keylen: ",keylen," Valuelen: ", valuelen)
         -- If length of field is longer than 127, we represent 
         -- it as 4 bytes with high bit set to 1 (+2147483648 or FCGI_PARAM_HIGH_BIT)
 
         local keylen_b, valuelen_b
 
-        if keylen < 127 then
+        if keylen <= 127 then
             keylen_b = ntob(keylen)
+            ngx_log(ngx_ERR,"Key 1b")
         else
             keylen_b = ntob(keylen + FCGI_PARAM_HIGH_BIT,4)
+            ngx_log(ngx_ERR,"Key 4b")
         end
 
-        if valuelen < 127 then
+        if valuelen <= 127 then
             valuelen_b = ntob(valuelen)
+            ngx_log(ngx_ERR,"Value 1b")
         else
             valuelen_b = ntob(valuelen + FCGI_PARAM_HIGH_BIT,4)
+            ngx_log(ngx_ERR,"Value 4b")
         end
 
         new_params[idx] = tbl_concat({
@@ -293,6 +298,7 @@ local function _format_params(params)
 
     local new_params_str = tbl_concat(new_params)
 
+    ngx_log(ngx_ERR,"Length: ",#new_params_str)
     local start_params, padding = _pack_header({
         type            = FCGI_PARAMS,
         content_length  = #new_params_str
@@ -303,14 +309,12 @@ end
 
 
 local function _format_stdin(stdin)
-    local stdin_length = #stdin
-    if stdin_length == 0 then
-        return FCGI_PREPACKED.empty_stdin
-    end
-
     local chunk_length
-    local to_send, stdin_chunk, header = {}, {"","",""}, ""
+    local to_send = {}
+    local stdin_chunk = {"","",""}
+    local header = ""
     local padding, idx = 0, 1
+    local stdin_length = #stdin
 
     -- We could potentially need to send more than one records' worth of data, so
     -- loop to format.
@@ -333,41 +337,44 @@ local function _format_stdin(stdin)
 
         to_send[idx] = tbl_concat(stdin_chunk)
         stdin = str_sub(stdin,chunk_length+1)
+        stdin_length = stdin_length - chunk_length
         idx = idx + 1
-    until #stdin == 0
+    until stdin_length == 0
 
     return tbl_concat(to_send)
 end
 
 
 local function _send_stdin(sock,stdin)
+
+    local ok, bytes, err, chunk, partial
+
     if type(stdin) == 'function' then
         repeat
-            local chunk, err, partial = stdin()
+            chunk, err, partial = stdin()
 
             -- If the iterator returns nil, then we have no more stdin
             -- Send an empty stdin record to signify the end of the request
-            if not chunk and not err then
-                 local ok,err = sock:send(_format_stdin(""))
-            -- If we have a chunk, then format and send it
-            elseif chunk then 
-                local ok,err = sock:send(_format_stdin(chunk))
+            if chunk then 
+                ok,err = sock:send(_format_stdin(chunk))
+                if not ok then
+                    return nil, err
+                end 
             -- Otherwise iterator errored, return
             elseif err ~= nil then
                 return nil, err, partial
             end
-
-            if not ok then
-                return nil, err
-            end
-
         until chunk == nil
+        -- Send empty stdin record to signify end
+        bytes, err = sock:send(FCGI_PREPACKED.empty_stdin)
     elseif stdin ~= nil then
-        local bytes, err = sock:send(_format_stdin(stdin))
-        if not bytes then
-            return nil, err
-        end
+        bytes, err = sock:send(_format_stdin(stdin) .. FCGI_PREPACKED.empty_stdin)
     end
+
+    if not bytes then
+        return nil, err
+    end
+
     return true, nil
 end
 
@@ -469,16 +476,16 @@ function _M.request(self,parameters)
     -- Send request
     local bytes_sent, err, partial = sock:send(req)
     if not bytes_sent then
-        return nil, err, partial
+        return nil, "Failed to send request, " .. err, partial
     end
 
     -- Send body if any
     local ok, err, partial = _send_stdin(sock, stdin)
     if not ok then
-        return nil, err, partial
+        return nil, "Failed to send stdin, " .. err, partial
     end
 
-    return bytes_sent, nil
+    return true, nil
 end
 
 return _M
