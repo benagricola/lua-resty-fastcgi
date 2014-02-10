@@ -16,21 +16,25 @@ our $HttpConfig = qq{
     ';
 };
 
+
 our sub pack_padding {
     my ($paddinglength) = @_;
     return pack("x[$paddinglength]");
 }
+
 
 our sub pack_fcgi_header {
     my ($version,$rectype,$reqid,$contentlength,$paddinglength) = @_;
     return pack("CCnnCx",$version,$rectype,$reqid,$contentlength,$paddinglength);
 }
 
+
 our sub calculate_padding_length {
     my ($contentLength) = @_;
     my $align = 8;
     return (-$contentLength) & ($align - 1);
 }
+
 
 our sub pack_fcgi_record {
     my($recordType,$content) = @_;
@@ -40,11 +44,13 @@ our sub pack_fcgi_record {
     return pack_fcgi_header(1,$recordType,1,$contentLength,$paddingLength) . $content . pack_padding($paddingLength)
 }
 
+
 our sub pack_fcgi_begin_request {
     my ($role,$flags) = @_;
     my $reqBody = pack("nCx[5]",$role,$flags);
     return pack_fcgi_record(1,$reqBody);
 }
+
 
 our sub pack_fcgi_params {
     my(%params) = @_;
@@ -70,6 +76,7 @@ our sub pack_fcgi_params {
     return pack_fcgi_record(4,$paramStr) . pack_fcgi_record(4,"")
 }
 
+
 our sub pack_fcgi_stdin {
     my ($content) = @_;
     my $n = 32768;
@@ -82,15 +89,32 @@ our sub pack_fcgi_stdin {
     return $out . pack_fcgi_record(5,"");
 }
 
+
 our sub pack_fcgi_stdout {
     my ($content) = @_;
-    return pack_fcgi_record(6,$content);
+    my $n = 32768;
+    my @records = unpack("a$n" x ((length($content)/$n)) . "a*", $content);
+
+    my $out = "";
+    foreach my $item (@records) {
+        $out .= pack_fcgi_record(6,$item);
+    }
+    return $out . pack_fcgi_record(6,"");
 }
+
 
 our sub pack_fcgi_stderr {
     my ($content) = @_;
-    return pack_fcgi_record(7,$content);
+    my $n = 32768;
+    my @records = unpack("a$n" x ((length($content)/$n)) . "a*", $content);
+
+    my $out = "";
+    foreach my $item (@records) {
+        $out .= pack_fcgi_record(7,$item);
+    }
+    return $out . pack_fcgi_record(7,"");
 }
+
 
 our sub pack_fcgi_end_request {
     my ($appStatus,$protoStatus) = @_;
@@ -262,7 +286,7 @@ my(%params) = (
 return ::pack_fcgi_begin_request(1,1) . ::pack_fcgi_params(%params) . ::pack_fcgi_stdin("TEST 2")
 
 
-=== TEST 3: Validate long body
+=== TEST 3: Validate long request / response body
 --- http_config eval: $::HttpConfig
 --- config
     location = /a {
@@ -275,7 +299,7 @@ return ::pack_fcgi_begin_request(1,1) . ::pack_fcgi_params(%params) . ::pack_fcg
 
             fcgic:set_timeout(60000)
 
-            local bodycontent = string.rep("FOOBARRABOOF",5000)
+            local bodycontent = string.rep("FOOBARRABOOF",6000)
             local res, err = fcgic:request({
               params = {
                 PARAM_1 = "val1",
@@ -331,9 +355,9 @@ GET /a
 OK
 --- tcp_listen: 31498
 --- tcp_reply_delay: 500ms
---- tcp_query_len: 60088
+--- tcp_query_len: 72096
 --- tcp_reply eval
-return ::pack_fcgi_stdout("FOOBARRABOOF" x 5000) . ::pack_fcgi_end_request(0,0)
+return ::pack_fcgi_stdout("FOOBARRABOOF" x 6000) . ::pack_fcgi_end_request(0,0)
 --- tcp_query eval
 my(%params) = ('PARAM_1' => 'val1','PARAM_2' => 'val2');
-return ::pack_fcgi_begin_request(1,1) . ::pack_fcgi_params(%params) . ::pack_fcgi_stdin("FOOBARRABOOF" x 5000)
+return ::pack_fcgi_begin_request(1,1) . ::pack_fcgi_params(%params) . ::pack_fcgi_stdin("FOOBARRABOOF" x 6000)

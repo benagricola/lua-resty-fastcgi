@@ -92,6 +92,7 @@ local FCGI_HIDE_HEADERS = {
     "X-Accel-Charset"
 }
 
+
 local FCGI_PADDING_BYTES = {
     str_char(0),
     str_char(0,0),
@@ -187,8 +188,6 @@ function _M.new(_)
     local self = {
         sock            = sock,
         keepalives      = false,
-        buffer          = {},
-        buffer_length   = 1024,
     }
 
     return setmetatable(self, mt)
@@ -260,6 +259,8 @@ local function _format_params(params)
 
     -- Iterate over each param
     for key,value in pairs(params) do
+        key             = tostring(key)
+        value           = tostring(value)
 
         local keylen    = #key
         local valuelen  = #value
@@ -359,11 +360,16 @@ local function _send_stdin(sock,stdin)
                 return nil, err, partial
             end
         until chunk == nil
-        -- Send empty stdin record to signify end
-        bytes, err = sock:send(FCGI_PREPACKED.empty_stdin)
     elseif stdin ~= nil then
-        bytes, err = sock:send(_format_stdin(stdin) .. FCGI_PREPACKED.empty_stdin)
+        bytes, err = sock:send(_format_stdin(stdin))
+
+        if not bytes then
+            return nil, err
+        end
     end
+
+    -- Send empty stdin record to signify end
+    bytes, err = sock:send(FCGI_PREPACKED.empty_stdin)
 
     if not bytes then
         return nil, err
@@ -476,7 +482,7 @@ function _M.request(self,parameters)
     -- Send body if any
     local ok, err, partial = _send_stdin(sock, stdin)
     if not ok then
-        return nil, "Failed to send stdin, " .. err, partial
+        return nil, "Failed to send stdin, " .. (err or "Unkown error"), partial
     end
 
     return true, nil
