@@ -1,4 +1,5 @@
 local fcgi = require 'resty.fastcgi'
+local http = require 'resty.http'
 
 local ngx_var           = ngx.var
 local ngx_re_gsub       = ngx.re.gsub
@@ -29,13 +30,12 @@ local _M = {
 
 local mt = { __index = _M }
 
-
-local DEFAULT_PARAMS = {
-    method  = "GET",
-    path    = "/",
-    version = 1.1,
-}
-
+local function _should_receive_body(method, code)
+    if method == "HEAD" then return nil end
+    if code == 204 or code == 304 then return nil end
+    if code >= 100 and code < 200 then return nil end
+    return true
+end
 
 local function parse_headers(str)
 
@@ -154,14 +154,14 @@ end
 
 
 function _M.request(self,params)
-    -- Apply defaults
-    setmetatable(params, { __index = DEFAULT_PARAMS })
-
     local fcgi          = self.fcgi
     local sock          = fcgi.sock
     local headers       = params.headers or {}
     local body          = params.body
-    local user_params   = params.fcgi_params or {}
+    local user_params   = params.fastcgi or {}
+
+    local request_method = user_params.request_method or ngx_var.request_method
+    local script_name = user_params.script_name or ngx_re_gsub(user_params.request_uri or ngx.var.request_uri, "\\?.*", "","jo")
 
     -- Set default headers if we can
     if type(body) == 'string' and not headers["Content-Length"] then
@@ -175,14 +175,14 @@ function _M.request(self,params)
     end
 
     local fcgi_params = {
-        SCRIPT_NAME       = user_params.script_name or ngx_re_gsub(user_params.request_uri or ngx.var.request_uri, "\\?.*", "","jo"),
+        SCRIPT_NAME       = script_name,
         SCRIPT_FILENAME   = user_params.script_filename or "index.php",
         DOCUMENT_ROOT     = user_params.document_root or ngx_var.document_root,
-        REQUEST_METHOD    = user_params.request_method or ngx_var.request_method,
+        REQUEST_METHOD    = request_method,
         CONTENT_TYPE      = user_params.content_type or ngx_var.content_type,
         CONTENT_LENGTH    = headers["Content-Length"] or ngx_var.content_length,
         REQUEST_URI       = user_params.request_uri or ngx_var.request_uri,
-        DOCUMENT_URI      = user_params.document_uri or ngx_re_gsub(user_params.request_uri or ngx.var.request_uri, "\\?.*", "","jo"),
+        DOCUMENT_URI      = script_name,
         QUERY_STRING      = user_params.args or (ngx_var.args or ""),
         SERVER_PROTOCOL   = user_params.server_protocol or ngx_var.server_protocol,
         GATEWAY_INTERFACE = "CGI/1.1",
@@ -193,7 +193,6 @@ function _M.request(self,params)
         SERVER_PORT       = ngx_var.server_port,
         SERVER_NAME       = ngx_var.server_name or "host",
     }
-
 
     for k,v in pairs(headers) do
         local clean_header = ngx_re_gsub(str_upper(k),"-","_","jo")
@@ -213,7 +212,7 @@ function _M.request(self,params)
 
     local body_reader = self:get_response_reader()
     local have_http_headers = false
-    local res = {status = nil, headers = nil}
+    local res = {status = nil, headers = nil, has_body = false}
 
     -- Read chunks off the network until we get the first stdout chunk.
     -- Buffer remaining stdout data and log any Stderr info to nginx error log
@@ -225,7 +224,7 @@ function _M.request(self,params)
         end
 
         -- We can't have stderr and stdout in the same chunk
-        if not have_http_headers then
+        if not have_http_headers and #chunk > 0 then
             http_headers,remaining_stdout = parse_headers(chunk)
 
             if not http_headers then
@@ -252,11 +251,17 @@ function _M.request(self,params)
                 res.status = 200
             end
 
+            res.has_body = _should_receive_body(request_method,res.status)
+
             return res
         end
     until not chunk
 
     return res
+end
+
+function _M.get_client_body_reader(self,chunksize)
+    return http.get_client_body_reader(nil,chunksize)
 end
 
 return _M

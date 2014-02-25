@@ -346,21 +346,25 @@ local function _send_stdin(sock,stdin)
 
     if type(stdin) == 'function' then
         repeat
-            chunk, err, partial = stdin()
+            chunk, err, partial = stdin(FCGI_BODY_MAX_LENGTH)
 
             -- If the iterator returns nil, then we have no more stdin
             -- Send an empty stdin record to signify the end of the request
-            if chunk then 
+            if chunk then
+                ngx_log(ngx_DEBUG,"Request body reader yielded ",#chunk," bytes of data - sending")
                 ok,err = sock:send(_format_stdin(chunk))
                 if not ok then
+                    ngx_log(ngx_DEBUG,"Unable to send ",#chunk," bytes of stdin: ",err)
                     return nil, err
                 end 
             -- Otherwise iterator errored, return
             elseif err ~= nil then
+                ngx_log(ngx_DEBUG,"Request body reader yielded an error: ",err)
                 return nil, err, partial
             end
         until chunk == nil
     elseif stdin ~= nil then
+        ngx_log(ngx_DEBUG,"Sending ",#stdin," bytes of read data")
         bytes, err = sock:send(_format_stdin(stdin))
 
         if not bytes then
