@@ -123,7 +123,7 @@ end
 
 function _M.get_reused_times(self)
     local fcgi = self.fcgi
-    return fcgi,sock:getreusedtimes()
+    return fcgi.sock:getreusedtimes()
 end
 
 
