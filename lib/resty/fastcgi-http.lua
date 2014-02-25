@@ -23,12 +23,23 @@ local pairs             = pairs
 local ipairs            = ipairs
 
 
+local FCGI_HIDE_HEADERS = {
+    "Status"                = true,
+    "X-Accel-Expires"       = true,
+    "X-Accel-Redirect"      = true,
+    "X-Accel-Limit-Rate"    = true,
+    "X-Accel-Buffering"     = true,
+    "X-Accel-Charset"       = true
+}
+
+
 local _M = {
     _VERSION = '0.01',
 }
 
 
 local mt = { __index = _M }
+
 
 local function _should_receive_body(method, code)
     if method == "HEAD" then return nil end
@@ -37,7 +48,16 @@ local function _should_receive_body(method, code)
     return true
 end
 
-local function parse_headers(str)
+
+local function _hide_headers(headers)
+    for _,v in ipairs(FCGI_HIDE_HEADERS) do
+        headers[v] = nil
+    end
+    return headers
+end
+
+
+local function _parse_headers(str)
 
     -- Only look in the first header_buffer_len bytes
     local header_buffer_len = 1024
@@ -59,10 +79,12 @@ local function parse_headers(str)
         for header_pairs in ngx_re_gmatch(line[0], "([\\w\\-]+)\\s*:\\s*(.+)","jo") do
             local header_name   = header_pairs[1]
             local header_value  = header_pairs[2]
-            if http_headers[header_name] then
-                http_headers[header_name] = http_headers[header_name] .. ", " .. tostring(header_value)
-            else
-                http_headers[header_name] = tostring(header_value)
+            if not FCGI_HIDE_HEADERS[header_name] then 
+                if http_headers[header_name] then
+                    http_headers[header_name] = http_headers[header_name] .. ", " .. tostring(header_value)
+                else
+                    http_headers[header_name] = tostring(header_value)
+                end
             end
         end
     end
@@ -225,7 +247,7 @@ function _M.request(self,params)
 
         -- We can't have stderr and stdout in the same chunk
         if not have_http_headers and #chunk > 0 then
-            http_headers,remaining_stdout = parse_headers(chunk)
+            http_headers,remaining_stdout = _parse_headers(chunk)
 
             if not http_headers then
                 res.status = 500
@@ -238,7 +260,7 @@ function _M.request(self,params)
 
             local status_header = http_headers['Status']
 
-            -- If FCGI response contained a status header, then assume that
+            -- If FCGI response contained a status header, then assume that status
             if status_header then 
                 res.status = tonumber(str_sub(status_header, 1, 3))
 

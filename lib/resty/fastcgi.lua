@@ -83,16 +83,6 @@ local FCGI_END_REQ_FORMAT = {
 }
 
 
-local FCGI_HIDE_HEADERS = {
-    "Status",
-    "X-Accel-Expires",
-    "X-Accel-Redirect",
-    "X-Accel-Limit-Rate",
-    "X-Accel-Buffering",
-    "X-Accel-Charset"
-}
-
-
 local FCGI_PADDING_BYTES = {
     str_char(0),
     str_char(0,0),
@@ -246,14 +236,6 @@ function _M.close(self)
 end
 
 
-local function _hide_headers(headers)
-    for _,v in ipairs(FCGI_HIDE_HEADERS) do
-        headers[v] = nil
-    end
-    return headers
-end
-
-
 local function _format_params(params)
     local new_params, idx = {}, 1
 
@@ -266,7 +248,8 @@ local function _format_params(params)
         local valuelen  = #value
 
         -- If length of field is longer than 127, we represent 
-        -- it as 4 bytes with high bit set to 1 (+2147483648 or FCGI_PARAM_HIGH_BIT)
+        -- it as 4 bytes with high bit set to 1 (+2147483648 
+        -- or FCGI_PARAM_HIGH_BIT)
 
         local keylen_b, valuelen_b
 
@@ -390,11 +373,12 @@ function _M.get_response_reader(self)
     local padding_length    = 0
 
     return function(chunk_size)
+        -- 65536 is the maximum content length of a FCGI record
         local chunk_size = chunk_size or 65536
         local res = { stdout = nil, stderr = nil}
         local data, err, partial, header_bytes, bytes_to_read
 
-        -- If we don't have a length of data to read yet, attempt to read a FCGI record header
+        -- If we don't have a length of data to read yet, attempt to read a record header
         if not record_type then
             ngx_log(ngx_DEBUG,"Attempting to grab next FCGI record")
             local header_bytes, err = sock:receive(FCGI_HEADER_LEN)
@@ -455,6 +439,7 @@ function _M.get_response_reader(self)
         -- If we've read all of the data that we have 'available' in this record, then start again
         -- by attempting to parse another record the next time this function is called.
         if content_length == 0 then
+            -- Read and discard padding data
             _ = sock:receive(padding_length)
             ngx_log(ngx_DEBUG,"Resetting record type")
             record_type = nil
