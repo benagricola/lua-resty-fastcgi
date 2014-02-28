@@ -133,26 +133,21 @@ function _M.close(self)
 end
 
 function _M.get_response_reader(self)
-    local buffer            = self.stdout_buffer
-    local fcgi              = self.fcgi
-    local buffer_length     = #buffer
-    local response_reader   = fcgi:get_response_reader()
+    local response_reader   = self.fcgi:get_response_reader()
 
     return function(chunk_size)
         local chunk_size = chunk_size or 65536
         local data, err
-
+        local buffer = self.stdout_buffer
         -- If we have buffered data then return from the buffer
-        if buffer_length > 0 then
+        if buffer then
             local return_data
-            if chunk_size > buffer_length then
+            if chunk_size > #buffer then
                 return_data     = buffer
-                buffer          = ""
-                buffer_length   = 0
+                self.stdout_buffer = nil
             else
                 return_data     = str_sub(buffer,1,chunk_size)
-                buffer          = str_sub(buffer,chunk_size+1)
-                buffer_length   = #buffer
+                self.stdout_buffer          = str_sub(buffer,chunk_size+1)
             end
 
             return return_data
@@ -254,7 +249,7 @@ function _M.request(self,params)
                 return
             end
 
-            self.stdout_buffer = tbl_concat({self.stdout_buffer,remaining_stdout})
+            self.stdout_buffer = tbl_concat({self.stdout_buffer or "",remaining_stdout})
 
             res.headers = http_headers
 
