@@ -236,8 +236,8 @@ local function _format_params(params)
         local keylen    = #key
         local valuelen  = #value
 
-        -- If length of field is longer than 127, we represent 
-        -- it as 4 bytes with high bit set to 1 (+2147483648 
+        -- If length of field is longer than 127, we represent
+        -- it as 4 bytes with high bit set to 1 (+2147483648
         -- or FCGI_PARAM_HIGH_BIT)
 
         local keylen_b, valuelen_b
@@ -291,7 +291,7 @@ local function _format_stdin(stdin)
             chunk_length = FCGI_BODY_MAX_LENGTH
         else
             chunk_length = stdin_length
-        end 
+        end
 
         header, padding = _pack_header({
             type            = FCGI_STDIN,
@@ -328,7 +328,7 @@ local function _send_stdin(sock,stdin)
                 if not ok then
                     ngx_log(ngx_DEBUG,"Unable to send ",#chunk," bytes of stdin: ",err)
                     return nil, err
-                end 
+                end
             -- Otherwise iterator errored, return
             elseif err ~= nil then
                 ngx_log(ngx_DEBUG,"Request body reader yielded an error: ",err)

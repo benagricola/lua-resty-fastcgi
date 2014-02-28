@@ -79,7 +79,7 @@ local function _parse_headers(str)
         for header_pairs in ngx_re_gmatch(line[0], "([\\w\\-]+)\\s*:\\s*(.+)","jo") do
             local header_name   = header_pairs[1]
             local header_value  = header_pairs[2]
-            if not FCGI_HIDE_HEADERS[header_name] then 
+            if not FCGI_HIDE_HEADERS[header_name] then
                 if http_headers[header_name] then
                     http_headers[header_name] = http_headers[header_name] .. ", " .. tostring(header_value)
                 else
@@ -133,28 +133,23 @@ function _M.close(self)
 end
 
 function _M.get_response_reader(self)
-    local buffer            = self.stdout_buffer
-    local fcgi              = self.fcgi
-    local buffer_length     = #buffer
-    local response_reader   = fcgi:get_response_reader()
+    local response_reader   = self.fcgi:get_response_reader()
 
     return function(chunk_size)
         local chunk_size = chunk_size or 65536
         local data, err
-
-        -- If we have buffered data then return from the buffer 
-        if buffer_length > 0 then
+        local buffer = self.stdout_buffer
+        -- If we have buffered data then return from the buffer
+        if buffer then
             local return_data
-            if chunk_size > buffer_length then
+            if chunk_size > #buffer then
                 return_data     = buffer
-                buffer          = ""
-                buffer_length   = 0
+                self.stdout_buffer = nil
             else
                 return_data     = str_sub(buffer,1,chunk_size)
-                buffer          = str_sub(buffer,chunk_size+1)
-                buffer_length   = #buffer
+                self.stdout_buffer          = str_sub(buffer,chunk_size+1)
             end
-            
+
             return return_data
 
         -- Otherwise simply return from the fcgi response reader
@@ -234,7 +229,7 @@ function _M.request(self,params)
 
     local body_reader = self:get_response_reader()
     local have_http_headers = false
-    local res = {status = nil, headers = nil, has_body = false}
+    local res = {status = nil, headers = nil, has_body = false, body_reader = body_reader}
 
     -- Read chunks off the network until we get the first stdout chunk.
     -- Buffer remaining stdout data and log any Stderr info to nginx error log
@@ -254,14 +249,14 @@ function _M.request(self,params)
                 return
             end
 
-            self.stdout_buffer = tbl_concat({self.stdout_buffer,remaining_stdout})
-            
+            self.stdout_buffer = tbl_concat({self.stdout_buffer or "",remaining_stdout})
+
             res.headers = http_headers
 
             local status_header = http_headers['Status']
 
             -- If FCGI response contained a status header, then assume that status
-            if status_header then 
+            if status_header then
                 res.status = tonumber(str_sub(status_header, 1, 3))
 
             -- If a HTTP location is given but no HTTP status, this is a redirect
