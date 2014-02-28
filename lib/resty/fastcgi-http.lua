@@ -24,12 +24,12 @@ local ipairs            = ipairs
 
 
 local FCGI_HIDE_HEADERS = {
-    "Status"                = true,
-    "X-Accel-Expires"       = true,
-    "X-Accel-Redirect"      = true,
-    "X-Accel-Limit-Rate"    = true,
-    "X-Accel-Buffering"     = true,
-    "X-Accel-Charset"       = true
+    ["Status"]                = true,
+    ["X-Accel-Expires"]       = true,
+    ["X-Accel-Redirect"]      = true,
+    ["X-Accel-Limit-Rate"]    = true,
+    ["X-Accel-Buffering"]     = true,
+    ["X-Accel-Charset"]       = true,
 }
 
 

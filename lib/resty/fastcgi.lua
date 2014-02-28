@@ -5,23 +5,12 @@ local bton              = binutil.bton
 local bit_band          = bit.band
 
 local ngx_socket_tcp    = ngx.socket.tcp
-local ngx_encode_args   = ngx.encode_args
-local ngx_re_gsub       = ngx.re.gsub
-local ngx_re_gmatch     = ngx.re.gmatch
-local ngx_re_match      = ngx.re.match
-local ngx_re_find       = ngx.re.find
 local ngx_log           = ngx.log
 local ngx_DEBUG         = ngx.DEBUG
 local ngx_ERR           = ngx.ERR
 
 local str_char          = string.char
-local str_byte          = string.byte
-local str_rep           = string.rep
-local str_lower         = string.lower
-local str_upper         = string.upper
 local str_sub           = string.sub
-
-local math_floor        = math.floor
 
 local tbl_concat        = table.concat
 local pairs             = pairs
