@@ -79,7 +79,7 @@ local function _parse_headers(str)
         for header_pairs in ngx_re_gmatch(line[0], "([\\w\\-]+)\\s*:\\s*(.+)","jo") do
             local header_name   = header_pairs[1]
             local header_value  = header_pairs[2]
-            if not FCGI_HIDE_HEADERS[header_name] then 
+            if not FCGI_HIDE_HEADERS[header_name] then
                 if http_headers[header_name] then
                     http_headers[header_name] = http_headers[header_name] .. ", " .. tostring(header_value)
                 else
@@ -142,7 +142,7 @@ function _M.get_response_reader(self)
         local chunk_size = chunk_size or 65536
         local data, err
 
-        -- If we have buffered data then return from the buffer 
+        -- If we have buffered data then return from the buffer
         if buffer_length > 0 then
             local return_data
             if chunk_size > buffer_length then
@@ -154,7 +154,7 @@ function _M.get_response_reader(self)
                 buffer          = str_sub(buffer,chunk_size+1)
                 buffer_length   = #buffer
             end
-            
+
             return return_data
 
         -- Otherwise simply return from the fcgi response reader
@@ -234,7 +234,7 @@ function _M.request(self,params)
 
     local body_reader = self:get_response_reader()
     local have_http_headers = false
-    local res = {status = nil, headers = nil, has_body = false}
+    local res = {status = nil, headers = nil, has_body = false, body_reader = body_reader}
 
     -- Read chunks off the network until we get the first stdout chunk.
     -- Buffer remaining stdout data and log any Stderr info to nginx error log
@@ -255,13 +255,13 @@ function _M.request(self,params)
             end
 
             self.stdout_buffer = tbl_concat({self.stdout_buffer,remaining_stdout})
-            
+
             res.headers = http_headers
 
             local status_header = http_headers['Status']
 
             -- If FCGI response contained a status header, then assume that status
-            if status_header then 
+            if status_header then
                 res.status = tonumber(str_sub(status_header, 1, 3))
 
             -- If a HTTP location is given but no HTTP status, this is a redirect
