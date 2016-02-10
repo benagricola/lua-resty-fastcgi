@@ -23,6 +23,11 @@ local str_sub           = string.sub
 
 local tbl_concat        = table.concat
 
+local co_yield  = coroutine.yield
+local co_create = coroutine.create
+local co_status = coroutine.status
+local co_resume = coroutine.resume
+
 
 local FCGI_HIDE_HEADERS = {
     ["Status"]                = true,
@@ -32,6 +37,29 @@ local FCGI_HIDE_HEADERS = {
     ["X-Accel-Buffering"]     = true,
     ["X-Accel-Charset"]       = true,
 }
+
+-- Reimplemented coroutine.wrap, returning "nil, err" if the coroutine cannot
+-- be resumed. This protects user code from inifite loops when doing things like
+-- repeat
+--   local chunk, err = res.body_reader()
+--   if chunk then -- <-- This could be a string msg in the core wrap function.
+--     ...
+--   end
+-- until not chunk
+local co_wrap = function(func)
+    local co = co_create(func)
+    if not co then
+        return nil, "could not create coroutine"
+    else
+        return function(...)
+            if co_status(co) == "suspended" then
+                return select(2, co_resume(co, ...))
+            else
+                return nil, "can't resume a " .. co_status(co) .. " coroutine"
+            end
+        end
+    end
+end
 
 
 local _M = {
