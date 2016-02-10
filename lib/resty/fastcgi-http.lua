@@ -1,5 +1,4 @@
 local fcgi = require 'resty.fastcgi'
-local http = require 'resty.http'
 
 local ngx_var           = ngx.var
 local ngx_re_gsub       = ngx.re.gsub
@@ -90,6 +89,119 @@ local function _parse_headers(str)
     end
 
     return http_headers, str_sub(str,header_boundary+1)
+end
+
+
+local function _chunked_body_reader(sock, default_chunk_size)
+    return co_wrap(function(max_chunk_size)
+        local max_chunk_size = max_chunk_size or default_chunk_size
+        local remaining = 0
+        local length
+
+        repeat 
+            -- If we still have data on this chunk
+            if max_chunk_size and remaining > 0 then
+
+                if remaining > max_chunk_size then
+                    -- Consume up to max_chunk_size
+                    length = max_chunk_size
+                    remaining = remaining - max_chunk_size
+                else
+                    -- Consume all remaining
+                    length = remaining
+                    remaining = 0
+                end
+            else -- This is a fresh chunk 
+
+                -- Receive the chunk size
+                local str, err = sock:receive("*l")
+                if not str then
+                    co_yield(nil, err)
+                end
+
+                length = tonumber(str, 16)
+
+                if not length then
+                    co_yield(nil, "unable to read chunksize")
+                end
+            
+                if max_chunk_size and length > max_chunk_size then
+                    -- Consume up to max_chunk_size
+                    remaining = length - max_chunk_size
+                    length = max_chunk_size
+                end
+            end
+
+            if length > 0 then
+                local str, err = sock:receive(length)
+                if not str then
+                    co_yield(nil, err)
+                end
+                
+                max_chunk_size = co_yield(str) or default_chunk_size
+
+                -- If we're finished with this chunk, read the carriage return.
+                if remaining == 0 then
+                    sock:receive(2) -- read \r\n
+                end
+            else
+                -- Read the last (zero length) chunk's carriage return
+                sock:receive(2) -- read \r\n
+            end
+
+        until length == 0
+    end)
+end
+
+
+local function _body_reader(sock, content_length, default_chunk_size)
+    return co_wrap(function(max_chunk_size)
+        local max_chunk_size = max_chunk_size or default_chunk_size
+
+        if not content_length and max_chunk_size then
+            -- We have no length, but wish to stream.
+            -- HTTP 1.0 with no length will close connection, so read chunks to the end.
+            repeat
+                local str, err, partial = sock:receive(max_chunk_size)
+                if not str and err == "closed" then
+                    max_chunk_size = co_yield(partial, err) or default_chunk_size
+                end
+
+                max_chunk_size = co_yield(str) or default_chunk_size
+            until not str
+
+        elseif not content_length then
+            -- We have no length but don't wish to stream.
+            -- HTTP 1.0 with no length will close connection, so read to the end.
+            co_yield(sock:receive("*a"))
+
+        elseif not max_chunk_size then
+            -- We have a length and potentially keep-alive, but want everything.
+            co_yield(sock:receive(content_length))
+
+        else
+            -- We have a length and potentially a keep-alive, and wish to stream
+            -- the response.
+            local received = 0
+            repeat
+                local length = max_chunk_size
+                if received + length > content_length then
+                    length = content_length - received
+                end
+
+                if length > 0 then
+                    local str, err = sock:receive(length)
+                    if not str then
+                        max_chunk_size = co_yield(nil, err) or default_chunk_size
+                    end
+                    received = received + length
+
+                    max_chunk_size = co_yield(str) or default_chunk_size
+                end
+
+            until length == 0
+        end
+    end)
 end
 
 
@@ -277,8 +389,29 @@ function _M.request(self,params)
     return res
 end
 
-function _M.get_client_body_reader(self,chunksize)
-    return http.get_client_body_reader(nil,chunksize)
+function _M.get_client_body_reader(self, chunksize)
+    local chunksize = chunksize or 65536
+    local sock, err = ngx_req_socket()
+
+    if not sock then
+        if err == "no body" then
+            return nil
+        else
+            return nil, err
+        end
+    end
+
+    local headers = ngx_req_get_headers()
+    local length = headers["Content-Length"]
+    local encoding = headers["Transfer-Encoding"]
+    if length then
+        return _body_reader(sock, tonumber(length), chunksize)
+    elseif str_lower(encoding) == 'chunked' then
+        -- Not yet supported by ngx_lua but should just work...
+        return _chunked_body_reader(sock, chunksize)
+    else
+       return nil, "Unknown transfer encoding"
+    end
 end
 
 return _M
