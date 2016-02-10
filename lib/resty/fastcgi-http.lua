@@ -9,6 +9,10 @@ local ngx_log           = ngx.log
 local ngx_DEBUG         = ngx.DEBUG
 local ngx_ERR           = ngx.ERR
 
+local ngx_req             = ngx.req
+local ngx_req_socket      = ngx_req.socket
+local ngx_req_get_headers = ngx_req.get_headers
+
 local str_char          = string.char
 local str_byte          = string.byte
 local str_rep           = string.rep
@@ -18,8 +22,6 @@ local str_sub           = string.sub
 
 
 local tbl_concat        = table.concat
-local pairs             = pairs
-local ipairs            = ipairs
 
 
 local FCGI_HIDE_HEADERS = {

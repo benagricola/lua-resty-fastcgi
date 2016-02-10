@@ -3,6 +3,9 @@
 use Test::Nginx::Socket;
 use Cwd qw(cwd);
 
+no warnings "experimental::lexical_subs";
+use feature 'lexical_subs';
+
 plan tests => repeat_each() * (12);
 
 my $pwd = cwd();
@@ -197,7 +200,7 @@ GET /a
 --- response_body
 OK
 --- tcp_listen: 31498
---- tcp_reply_delay: 100ms
+--- tcp_reply_delay: 1000ms
 --- tcp_query_len: 88
 --- tcp_reply eval
 return ::pack_fcgi_stdout("TEST STDOUT 1") . ::pack_fcgi_end_request(0,0)
@@ -274,7 +277,7 @@ GET /a
 --- response_body
 OK
 --- tcp_listen: 31498
---- tcp_reply_delay: 100ms
+--- tcp_reply_delay: 1000ms
 --- tcp_query_len: 344
 --- tcp_reply eval
 return ::pack_fcgi_stdout("TEST STDOUT 2") . ::pack_fcgi_end_request(0,0)
@@ -354,7 +357,7 @@ GET /a
 --- response_body
 OK
 --- tcp_listen: 31498
---- tcp_reply_delay: 500ms
+--- tcp_reply_delay: 1000ms
 --- tcp_query_len: 72096
 --- tcp_reply eval
 return ::pack_fcgi_stdout("FOOBARRABOOF" x 6000) . ::pack_fcgi_end_request(0,0)
