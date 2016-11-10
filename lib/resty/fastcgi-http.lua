@@ -353,6 +353,11 @@ function _M.request(self,params)
         SERVER_NAME       = ngx_var.server_name or "host",
     }
 
+    local https_var = user_params.https or ngx_var.https
+    if https_var ~= '' then
+        fcgi_params['HTTPS'] = https_var
+    end
+
     for k,v in pairs(headers) do
         local clean_header = ngx_re_gsub(str_upper(k),"-","_","jo")
         fcgi_params["HTTP_" .. clean_header] = v
