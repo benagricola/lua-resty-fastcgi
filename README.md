@@ -1,8 +1,8 @@
-#lua-resty-fcgi
+# lua-resty-fcgi
 
 Lua FastCGI client driver for ngx_lua based on the cosocket API.
 
-#Table of Contents
+# Table of Contents
 
 * [Status](#status)
 * [Overview](#overview)
@@ -12,13 +12,13 @@ Lua FastCGI client driver for ngx_lua based on the cosocket API.
     * [request_simple](#request_simple)
     * [request](#request)
 
-#Status
+# Status
 
 Experimental, API may change without warning.
 
 Requires ngx_lua > 0.9.5
 
-#Overview
+# Overview
 
 Require the resty.fastcgi module in init_by_lua.
 
